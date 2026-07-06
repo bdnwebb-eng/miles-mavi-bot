@@ -1,4 +1,4 @@
-"""Hermes — Felipe's AI coaching bot. Entry point: wires handlers, schedules reminders, starts polling."""
+"""Miles: Kas Bordier's AI executive assistant bot. Entry point: wires handlers, schedules reminders, starts polling."""
 from __future__ import annotations
 
 import logging
@@ -41,7 +41,7 @@ def main() -> None:
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill it in.")
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        log.warning("ANTHROPIC_API_KEY not set — coaching replies will error until it is.")
+        log.warning("ANTHROPIC_API_KEY not set — AI replies will error until it is.")
 
     db.init_db()
 

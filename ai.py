@@ -1,4 +1,4 @@
-"""Builds the persona's coaching prompt and calls the Anthropic Claude API.
+"""Builds the persona prompt and calls the Anthropic Claude API.
 
 This file is PERSONA-AGNOSTIC. Everything specific to the person you are cloning
 lives in config/*.yaml — this code just assembles those pieces into a system
@@ -40,7 +40,7 @@ def build_system_prompt(tid: int) -> str:
         else ""
     )
 
-    # Client context: goals + program position so coaching is personalized.
+    # Client context: goals + program position so replies are personalized.
     goals = [g["text"] for g in db.active_goals(tid)]
     goals_line = (
         "The client's current goals: " + " | ".join(goals)
@@ -105,7 +105,7 @@ Keep replies concise and actionable."""
 
 
 def coach_reply(tid: int, user_text: str) -> str:
-    """Generate a coaching reply in the persona's voice, with short-term memory."""
+    """Generate a reply in the persona's voice, with short-term memory."""
     s = cfg.settings().get("ai", {})
     client = _get_client()
 
@@ -149,7 +149,7 @@ def reminder_text(tid: int) -> str:
 
     prompt = (
         "Write ONE short, warm accountability nudge (1-2 sentences) to send this client now, "
-        "in the coach's voice. Reference taking action / checking in on their goals. "
+        "in the assistant's voice. Reference taking action / checking in on their goals. "
         "Do not use a greeting like 'Dear'. Keep it punchy."
     )
     resp = client.messages.create(
