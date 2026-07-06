@@ -1,0 +1,31 @@
+ai:
+  model: "claude-sonnet-4-6"
+  max_tokens: 800
+  temperature: 0.6
+  history_window: 12
+
+bot:
+  name: "Miles"
+  timezone: "Europe/Zurich"
+
+reminders:
+  enabled: true
+  default_time: "07:30"   # morning brief nudge, Geneva time
+
+access:
+  restrict: true          # Kas only; add her Telegram ID at go-live
+  access_code: "MAVI-MILES-2026"
+  allowed_ids: [8533640297]   # Brandon (builder); add Kas at go-live
+
+features:
+  coaching: true
+  program: false          # Miles is an EA, not a curriculum bot
+  resources: true
+  accountability: true
+
+voice:
+  provider: "elevenlabs"
+  voice_id: "9n6dGtreZHvmNb14Y1VO"   # CJ, Young Swedish Male
+  model_id: "eleven_multilingual_v2"
+  stability: 0.55
+  similarity_boost: 0.75

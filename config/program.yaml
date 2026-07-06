@@ -1,0 +1,4 @@
+# Not used: Miles is an EA, not a course. Feature disabled in settings.yaml.
+program:
+  name: "n/a"
+  lessons: []

@@ -1,0 +1,64 @@
+"""Hermes — Felipe's AI coaching bot. Entry point: wires handlers, schedules reminders, starts polling."""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import time
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from telegram.ext import Application, ContextTypes
+
+import ai
+import config_loader as cfg
+import database as db
+import handlers
+
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s", level=logging.INFO
+)
+log = logging.getLogger("hermes")
+
+
+async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """JobQueue callback: nudge every opted-in user whose reminder_time matches now (bot tz)."""
+    tz = ZoneInfo(cfg.settings()["bot"]["timezone"])
+    from datetime import datetime
+
+    now_hhmm = datetime.now(tz).strftime("%H:%M")
+    for user in db.users_with_reminders():
+        if (user["reminder_time"] or "")[:5] == now_hhmm:
+            try:
+                text = ai.reminder_text(user["telegram_id"])
+                await context.bot.send_message(chat_id=user["telegram_id"], text=text)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Reminder to %s failed: %s", user["telegram_id"], e)
+
+
+def main() -> None:
+    load_dotenv()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill it in.")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        log.warning("ANTHROPIC_API_KEY not set — coaching replies will error until it is.")
+
+    db.init_db()
+
+    app = Application.builder().token(token).build()
+    handlers.register(app)
+
+    # Schedule the reminder sweep once a minute; each user fires at their chosen HH:MM.
+    if cfg.settings().get("reminders", {}).get("enabled", True):
+        if app.job_queue is not None:
+            app.job_queue.run_repeating(send_daily_reminders, interval=60, first=10)
+            log.info("Reminder scheduler active.")
+        else:
+            log.warning("JobQueue unavailable — install python-telegram-bot[job-queue] for reminders.")
+
+    log.info("Hermes is running. Press Ctrl+C to stop.")
+    app.run_polling(allowed_updates=["message", "callback_query"])
+
+
+if __name__ == "__main__":
+    main()

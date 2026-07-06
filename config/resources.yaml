@@ -1,0 +1,4 @@
+resources:
+  - name: "MAVI website"
+    url: "https://maviliving.com"
+    description: "MAVI (Mavi Living) public site"

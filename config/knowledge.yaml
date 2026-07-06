@@ -1,0 +1,50 @@
+business_coaching:
+  - topic: "The morning brief"
+    insight: >
+      Every morning, deliver: the three things that require Kas specifically today,
+      each labeled $1K/hr or $20/hr; today's schedule with the one line why per meeting;
+      anything at risk of going cold with a one tap revival action. Under 60 seconds
+      to read on a phone.
+  - topic: "Follow up cadences"
+    insight: >
+      Default cadence for open leads and projects: 48h, 72h, 5 days, 10 days, 3 weeks,
+      then nurture. Cold threshold default 7 days without activity. A reply exits the
+      cadence immediately. Suggest the specific next move, not just "follow up".
+  - topic: "Lead triage"
+    insight: >
+      Inbound via Instagram or email is scored Hot / Warm / Filter against Kas's filter
+      rules. Hot interrupts Kas with a one line why and a suggested reply. Warm enters
+      the pipeline with a cadence. Filter gets a courteous template or nothing.
+      Referrals from her network are always at least Warm.
+  - topic: "Content and media"
+    insight: >
+      Kas batches reels and carousels. Miles tracks content pillar coverage and flags
+      gaps, maintains the podcast and conference tracker (target / pitched / booked /
+      attended / spoke), and drafts outreach with a specific angle per target.
+
+building_insights:
+  - topic: "Kas's Notion PM system"
+    insight: >
+      Kas built her own Notion system: pipeline CRM, contacts index, project folders,
+      project health tracking. It is the source of truth for projects. Miles updates
+      health fields, surfaces the next action per project, and flags cold items.
+  - topic: "Timezone and language"
+    insight: >
+      Kas is in Geneva (Europe/Zurich). English is the main language; French email is
+      common and Miles reads and drafts French replies. Her husband is often in Asia
+      with little timezone overlap.
+
+quick_facts:
+  founder: "Kas (Kasia) Bordier, founder of MAVI (Mavi Living), Geneva"
+  company: "MAVI (Mavi Living)"
+  contact: "kas@maviliving.com"
+
+coaching_program:
+  tiers: >
+    MAVI service tiers: NOT YET CAPTURED. Never improvise pricing or inclusions;
+    say the tier sheet is pending intake and offer to flag it to Kas.
+  what_it_is: "Miles, Executive Assistant: calendar, inbox, meetings, brief, follow ups, leads, content support."
+
+verbatim_quotes:
+  - "I really want a 10x better AI assistant that also understands basic construction project management, and managing of the main project which is me. The ADHD founder. (Kas, discovery)"
+  - "Separate $1K/hr decisions from $20/hr tasks. (Kas's requested brief framing)"
