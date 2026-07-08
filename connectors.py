@@ -7,14 +7,16 @@ set the env vars, redeploy, done. No code changes.
 Currently shipped:
   email  : IMAP read only (works with Gmail app passwords, Infomaniak, any IMAP host)
            EMAIL_IMAP_HOST, EMAIL_ADDRESS, EMAIL_APP_PASSWORD  [optional EMAIL_IMAP_PORT]
-  notion : Notion REST API read only (search + read page)
-           NOTION_API_KEY
+  notion : Notion REST API (search + read + scoped project writes)
+           NOTION_API_KEY  [optional NOTION_PROJECTS_DB_ID for the cold-flag scan]
 
 Adding a connector later (calendar, Slack, Instagram, Dispatch):
 subclass Connector, implement configured() / tools() / run(), append to CONNECTORS.
 
-Trust model: connectors are READ ONLY by design. Miles never sends, deletes,
-or modifies anything through a connector. Drafts stay drafts until Kas taps.
+Trust model: email is READ ONLY. Notion allows one scoped write: updating a
+property on a project page (health, next action, dates) per the SOW; every write
+is announced to the principal in the reply. Nothing is ever sent, deleted, or
+published through a connector. Drafts stay drafts until Kas taps.
 """
 from __future__ import annotations
 
@@ -187,7 +189,79 @@ class NotionConnector(Connector):
                     "required": ["page_id"],
                 },
             },
+            {
+                "name": "notion_query_database",
+                "description": "List rows of a Notion database with their properties (read only). Use for the principal's project pipeline: titles, status/health fields, dates.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "database_id": {"type": "string", "description": "Database id (from notion_search or configuration)."},
+                        "page_size": {"type": "integer", "description": "Rows to return, max 50. Default 25."},
+                    },
+                    "required": ["database_id"],
+                },
+            },
+            {
+                "name": "notion_update_property",
+                "description": "Update ONE property on a Notion page (e.g. project health, next action, a date). The only write Miles is allowed. Always tell the principal exactly what you changed.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "page_id": {"type": "string", "description": "The page (database row) to update."},
+                        "property": {"type": "string", "description": "Exact property name, e.g. 'Health' or 'Next action'."},
+                        "prop_type": {
+                            "type": "string",
+                            "enum": ["select", "status", "rich_text", "date", "checkbox", "number"],
+                            "description": "The property's type in the database schema.",
+                        },
+                        "value": {"type": "string", "description": "New value. For date use YYYY-MM-DD; for checkbox use true/false."},
+                    },
+                    "required": ["page_id", "property", "prop_type", "value"],
+                },
+            },
         ]
+
+    @staticmethod
+    def _prop_value(prop: dict):
+        """Flatten one Notion property to a plain value for the model."""
+        t = prop.get("type", "")
+        v = prop.get(t)
+        if v is None:
+            return None
+        if t == "title" or t == "rich_text":
+            return "".join(x.get("plain_text", "") for x in v)
+        if t in ("select", "status"):
+            return (v or {}).get("name")
+        if t == "multi_select":
+            return [x.get("name") for x in v]
+        if t == "date":
+            return (v or {}).get("start")
+        if t in ("checkbox", "number", "url", "email", "phone_number"):
+            return v
+        if t == "people":
+            return [x.get("name") or x.get("id") for x in v]
+        if t == "last_edited_time" or t == "created_time":
+            return v
+        return str(v)[:120]
+
+    @staticmethod
+    def _build_prop_payload(ptype: str, val: str):
+        if ptype == "select":
+            return {"select": {"name": val}}
+        if ptype == "status":
+            return {"status": {"name": val}}
+        if ptype == "rich_text":
+            return {"rich_text": [{"type": "text", "text": {"content": val[:1900]}}]}
+        if ptype == "date":
+            return {"date": {"start": val}}
+        if ptype == "checkbox":
+            return {"checkbox": val.strip().lower() in ("true", "1", "yes", "on")}
+        if ptype == "number":
+            try:
+                return {"number": float(val)}
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _title_of(result: dict) -> str:
@@ -213,6 +287,38 @@ class NotionConnector(Connector):
                     for item in r.json().get("results", [])
                 ]
                 return json.dumps(out, ensure_ascii=False)
+            if tool_name == "notion_query_database":
+                dbid = args.get("database_id", "")
+                size = min(int(args.get("page_size", 25) or 25), 50)
+                r = http.post(
+                    f"{self._API}/databases/{dbid}/query",
+                    headers=self._headers(),
+                    json={"page_size": size},
+                )
+                r.raise_for_status()
+                rows = []
+                for pg in r.json().get("results", []):
+                    props_out = {}
+                    for pname, prop in (pg.get("properties") or {}).items():
+                        props_out[pname] = self._prop_value(prop)
+                    rows.append({"id": pg["id"], "properties": props_out})
+                return json.dumps(rows, ensure_ascii=False)[:8000]
+            if tool_name == "notion_update_property":
+                pid = args.get("page_id", "")
+                pname = args.get("property", "")
+                ptype = args.get("prop_type", "")
+                val = str(args.get("value", ""))
+                payload = self._build_prop_payload(ptype, val)
+                if payload is None:
+                    return f"Error: unsupported prop_type {ptype}."
+                r = http.patch(
+                    f"{self._API}/pages/{pid}",
+                    headers=self._headers(),
+                    json={"properties": {pname: payload}},
+                )
+                if r.status_code >= 400:
+                    return f"Error from Notion: {r.text[:400]}"
+                return f"Updated '{pname}' to '{val}'. Tell the principal this was changed."
             if tool_name == "notion_read_page":
                 pid = args.get("page_id", "")
                 r = http.get(f"{self._API}/blocks/{pid}/children?page_size=100", headers=self._headers())

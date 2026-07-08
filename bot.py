@@ -13,6 +13,7 @@ import ai
 import config_loader as cfg
 import database as db
 import handlers
+import notion_watch
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s", level=logging.INFO
@@ -35,6 +36,23 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.warning("Reminder to %s failed: %s", user["telegram_id"], e)
 
 
+async def send_cold_flags(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """JobQueue callback: daily proactive cold-project scan (SOW: message Kas when
+    anything goes cold). Silent unless Notion is wired AND something is actually cold."""
+    if not notion_watch.enabled():
+        return
+    import asyncio as _aio
+
+    report = await _aio.to_thread(notion_watch.cold_report)
+    if not report:
+        return
+    for user in db.users_with_reminders():
+        try:
+            await context.bot.send_message(chat_id=user["telegram_id"], text=report)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Cold flag to %s failed: %s", user["telegram_id"], e)
+
+
 def main() -> None:
     load_dotenv()
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -52,7 +70,9 @@ def main() -> None:
     if cfg.settings().get("reminders", {}).get("enabled", True):
         if app.job_queue is not None:
             app.job_queue.run_repeating(send_daily_reminders, interval=60, first=10)
-            log.info("Reminder scheduler active.")
+            tz = ZoneInfo(cfg.settings()["bot"]["timezone"])
+            app.job_queue.run_daily(send_cold_flags, time=time(hour=7, minute=35, tzinfo=tz))
+            log.info("Reminder scheduler active (cold scan daily 07:35 %s).", tz)
         else:
             log.warning("JobQueue unavailable — install python-telegram-bot[job-queue] for reminders.")
 

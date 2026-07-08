@@ -95,11 +95,13 @@ def build_system_prompt(tid: int) -> str:
         names = ", ".join(c.name for c in acts)
         tools_block = (
             "\n# Live connectors\n"
-            f"You have live READ ONLY tools wired: {names}. Use them whenever a question "
-            "needs real current data (inbox, Notion) instead of guessing. Summarize what "
-            "you find in your own voice; never dump raw output. You can never send, "
-            "delete, or modify anything through a connector: drafts stay drafts until "
-            "the principal approves.\n"
+            f"You have live tools wired: {names}. Use them whenever a question needs "
+            "real current data (inbox, Notion projects) instead of guessing. Summarize "
+            "what you find in your own voice; never dump raw output. Email is read only. "
+            "In Notion you may update ONE property at a time on a project page (health, "
+            "next action, dates) and you must tell the principal exactly what you "
+            "changed. You can never send, delete, or publish anything: drafts stay "
+            "drafts until the principal approves.\n"
         )
 
     brand = p.get("brand", "")
