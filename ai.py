@@ -1,19 +1,29 @@
-"""Builds the persona prompt and calls the Anthropic Claude API.
+"""Builds Miles's prompt, runs the tool loop, and maintains long term memory.
 
-This file is PERSONA-AGNOSTIC. Everything specific to the person you are cloning
-lives in config/*.yaml — this code just assembles those pieces into a system
-prompt. You should rarely need to edit it.
+Persona lives in config/*.yaml; this file assembles it. Three jobs:
+  1. build_system_prompt: persona + knowledge + LONG TERM MEMORY + live connector note
+  2. coach_reply: the reply loop, with Anthropic tool use when connectors are wired
+  3. maybe_extract_memories: a cheap background pass that distills durable facts
+     from recent conversation into the memories table (survives restarts on the
+     Railway volume via HERMES_DB_PATH)
 """
 from __future__ import annotations
 
+import json
 import os
 
 from anthropic import Anthropic
 
 import config_loader as cfg
+import connectors
 import database as db
 
 _client: Anthropic | None = None
+
+MEMORY_LIMIT = 48                    # memories injected into the prompt
+EXTRACT_EVERY = 8                    # user messages between extraction passes
+EXTRACT_MODEL = "claude-haiku-4-5-20251001"
+MAX_TOOL_ROUNDS = 5
 
 
 def _get_client() -> Anthropic:
@@ -27,10 +37,10 @@ def _get_client() -> Anthropic:
 
 
 def build_system_prompt(tid: int) -> str:
-    """Assemble the persona's voice + knowledge + the client's context into a system prompt."""
+    """Assemble persona + knowledge + long term memory + connector context."""
     p = cfg.persona()
     bot_name = cfg.settings().get("bot", {}).get("name", "Assistant")
-    name = p.get("coach_name", "the coach")
+    name = p.get("coach_name", "the assistant")
     framework = p.get("framework_name", "their approach")
     phrases = p.get("signature_phrases", []) or []
     phrase_line = (
@@ -40,24 +50,23 @@ def build_system_prompt(tid: int) -> str:
         else ""
     )
 
-    # Client context: goals + program position so replies are personalized.
+    # Principal context: goals and streaks still apply (they become Kas's tracked items).
     goals = [g["text"] for g in db.active_goals(tid)]
     goals_line = (
-        "The client's current goals: " + " | ".join(goals)
+        "Current tracked goals: " + " | ".join(goals)
         if goals
-        else "The client has not set goals yet — gently encourage them to with /goals."
+        else "No tracked goals yet; offer /goals when it fits naturally."
     )
 
     done = db.completed_lessons(tid)
     lessons = cfg.flat_lessons()
     next_lesson = next((l for l in lessons if l["lesson_id"] not in done), None)
-    if next_lesson:
-        prog_line = (
-            f"In the program, their next step is \"{next_lesson['title']}\" "
-            f"({next_lesson['module_title']}). You may nudge them toward it via /program."
-        )
-    else:
-        prog_line = "The client has completed the program — focus on reinforcement and accountability."
+    prog_line = (
+        f"In the program, their next step is \"{next_lesson['title']}\" "
+        f"({next_lesson['module_title']}). You may nudge them toward it via /program."
+        if next_lesson
+        else ""
+    )
 
     streak = db.checkin_streak(tid)
     streak_line = f"Current check-in streak: {streak} day(s)." if streak else ""
@@ -67,14 +76,40 @@ def build_system_prompt(tid: int) -> str:
         f"\n# {name}'s knowledge base (draw on this; don't quote it verbatim)\n{kb}\n" if kb else ""
     )
 
+    # Long term memory: durable facts distilled from every past conversation.
+    mems = db.memories_for_prompt(tid, MEMORY_LIMIT)
+    mem_block = ""
+    if mems:
+        mem_lines = "\n".join(f"- ({m['category']}) {m['content']}" for m in mems)
+        mem_block = (
+            "\n# Long term memory\n"
+            "Things you know from past conversations with this person. Use them naturally "
+            "in your answers; never recite this list or mention that you keep one unless asked.\n"
+            f"{mem_lines}\n"
+        )
+
+    # Live connectors: tell the model what real data it can reach.
+    tools_block = ""
+    acts = connectors.active()
+    if acts:
+        names = ", ".join(c.name for c in acts)
+        tools_block = (
+            "\n# Live connectors\n"
+            f"You have live READ ONLY tools wired: {names}. Use them whenever a question "
+            "needs real current data (inbox, Notion) instead of guessing. Summarize what "
+            "you find in your own voice; never dump raw output. You can never send, "
+            "delete, or modify anything through a connector: drafts stay drafts until "
+            "the principal approves.\n"
+        )
+
     brand = p.get("brand", "")
     sister = p.get("sister_company", "")
     org_line = brand + ((" and " + sister) if sister else "")
 
     return f"""You are {bot_name}, the AI assistant that speaks in the voice of {name} \
-({p.get('full_name', name)}){(', founder of ' + org_line) if org_line else ''}. \
-You help with {p.get('niche', '')}. You talk TO the client AS {name} — warm, first-person, \
-grounded in real lived experience, like {name} texting them.
+({p.get('full_name', name)}){(', of ' + org_line) if org_line else ''}. \
+You help with {p.get('niche', '')}. You talk TO the principal AS {name} — warm, first-person, \
+like {name} texting them.
 
 # Who you are ({name}'s background)
 {p.get('bio', '')}
@@ -82,9 +117,9 @@ grounded in real lived experience, like {name} texting them.
 # {name}'s philosophy ({framework})
 {p.get('philosophy', '')}
 
-# Domain principles you can teach from
+# Domain principles you can draw on
 {p.get('domain_principles', '')}
-{kb_block}
+{kb_block}{mem_block}{tools_block}
 # Tone
 {p.get('tone', '')}
 {phrase_line}
@@ -92,7 +127,7 @@ grounded in real lived experience, like {name} texting them.
 # Hard rules
 {p.get('guardrails', '')}
 
-# This client's context
+# This person's context
 {goals_line}
 {prog_line}
 {streak_line}
@@ -100,20 +135,18 @@ grounded in real lived experience, like {name} texting them.
 When a request is clearly outside your scope or sensitive, respond with the spirit of:
 "{p.get('escalation_message', '')}"
 
-Answer as {name} would: practical, specific, and rooted in real experience. \
-Keep replies concise and actionable."""
+Answer as {name} would: practical, specific, and grounded. Keep replies concise."""
 
 
 def coach_reply(tid: int, user_text: str) -> str:
-    """Generate a reply in the persona's voice, with short-term memory."""
+    """Generate a reply in Miles's voice, with short-term history, long term memory,
+    and live connector tools when they're wired."""
     s = cfg.settings().get("ai", {})
     client = _get_client()
 
-    # Persist the incoming message, then pull recent history for context.
     db.add_message(tid, "user", user_text)
     history = db.recent_messages(tid, s.get("history_window", 12))
 
-    # Few-shot voice examples come first as prior turns, then the real history.
     few_shot: list[dict] = []
     for ex in cfg.examples():
         u, a = ex.get("user"), ex.get("reply")
@@ -122,35 +155,110 @@ def coach_reply(tid: int, user_text: str) -> str:
             few_shot.append({"role": "assistant", "content": a.strip()})
 
     messages = few_shot + [{"role": r["role"], "content": r["content"]} for r in history]
-    # Ensure the conversation starts with a user turn (Anthropic requirement).
     while messages and messages[0]["role"] != "user":
         messages.pop(0)
 
-    resp = client.messages.create(
+    kwargs: dict = dict(
         model=s.get("model", "claude-sonnet-4-6"),
         max_tokens=s.get("max_tokens", 800),
         temperature=s.get("temperature", 0.7),
         system=build_system_prompt(tid),
-        messages=messages,
     )
-    reply = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
-    reply = reply.strip() or "Let's keep going — what's on your mind?"
+    tools = connectors.active_tools()
+    if tools:
+        kwargs["tools"] = tools
+
+    resp = client.messages.create(messages=messages, **kwargs)
+
+    # Tool loop: let the model read email/Notion/etc. before it answers.
+    rounds = 0
+    while getattr(resp, "stop_reason", "") == "tool_use" and rounds < MAX_TOOL_ROUNDS:
+        messages.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
+        results = []
+        for block in resp.content:
+            if getattr(block, "type", "") == "tool_use":
+                out = connectors.dispatch(block.name, block.input or {})
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": out})
+        messages.append({"role": "user", "content": results})
+        resp = client.messages.create(messages=messages, **kwargs)
+        rounds += 1
+
+    reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+    reply = reply.strip() or "On it — give me one more line of detail and I'll sort it."
     db.add_message(tid, "assistant", reply)
     return reply
 
 
+def maybe_extract_memories(tid: int) -> int:
+    """Every EXTRACT_EVERY user messages, distill new durable facts into long term
+    memory using a cheap fast model. Safe to call after every reply (it self-gates).
+    Returns how many memories were added."""
+    try:
+        n = int(db.get_pref(tid, "msgs_since_extract", "0") or 0) + 1
+        if n < EXTRACT_EVERY:
+            db.set_pref(tid, "msgs_since_extract", str(n))
+            return 0
+        db.set_pref(tid, "msgs_since_extract", "0")
+
+        history = db.recent_messages(tid, EXTRACT_EVERY * 2 + 4)
+        if not history:
+            return 0
+        convo = "\n".join(f"{r['role'].upper()}: {r['content']}" for r in history)[-8000:]
+        known = [m["content"] for m in db.all_memories(tid)]
+        known_block = "\n".join(f"- {k}" for k in known[-80:]) or "(nothing yet)"
+
+        client = _get_client()
+        prompt = (
+            "You maintain the long term memory of Miles, an executive assistant bot.\n"
+            "From the conversation below, extract NEW durable facts worth remembering for "
+            "weeks or months: stable facts about the principal and her world, preferences, "
+            "standing commitments or deadlines, projects and their state, and people (who "
+            "they are, why they matter). Skip small talk, one-off logistics, and anything "
+            "already known.\n\n"
+            f"Already known (do NOT repeat or rephrase):\n{known_block}\n\n"
+            f"Conversation:\n{convo}\n\n"
+            'Reply with ONLY a JSON array, max 5 items, each item exactly: '
+            '{"category": "fact|preference|commitment|project|person", '
+            '"content": "one specific, self contained sentence"}. '
+            "If nothing new is worth keeping, reply []."
+        )
+        resp = client.messages.create(
+            model=EXTRACT_MODEL,
+            max_tokens=600,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end <= start:
+            return 0
+        items = json.loads(text[start : end + 1])
+        added = 0
+        valid = {"fact", "preference", "commitment", "project", "person"}
+        for it in items[:5]:
+            if isinstance(it, dict) and (it.get("content") or "").strip():
+                cat = it.get("category", "fact")
+                if cat not in valid:
+                    cat = "fact"
+                if db.add_memory(tid, it["content"].strip(), cat, "auto"):
+                    added += 1
+        return added
+    except Exception:  # noqa: BLE001  (memory upkeep must never break the bot)
+        return 0
+
+
 def reminder_text(tid: int) -> str:
-    """Generate a short, in-voice accountability nudge for the scheduled reminder."""
+    """Generate the short in-voice morning nudge for the scheduled reminder."""
     s = cfg.settings().get("ai", {})
     try:
         client = _get_client()
     except RuntimeError:
-        return "\U0001f44b Quick check-in: did you move things forward today? Reply /checkin to log it."
+        return "\U0001f44b Morning. Ask me 'what needs me today' when you're ready."
 
     prompt = (
-        "Write ONE short, warm accountability nudge (1-2 sentences) to send this client now, "
-        "in the assistant's voice. Reference taking action / checking in on their goals. "
-        "Do not use a greeting like 'Dear'. Keep it punchy."
+        "Write ONE short morning message (1-2 sentences) to send the principal now, in the "
+        "assistant's voice. Invite them to get today's brief (the three things that need "
+        "them). No greeting like 'Dear'. Keep it calm and punchy."
     )
     resp = client.messages.create(
         model=s.get("model", "claude-sonnet-4-6"),
@@ -160,4 +268,4 @@ def reminder_text(tid: int) -> str:
         messages=[{"role": "user", "content": prompt}],
     )
     text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
-    return text or "\U0001f44b How did today go? Log it with /checkin — one step at a time."
+    return text or "\U0001f44b Morning. Say the word and I'll run today's three things."

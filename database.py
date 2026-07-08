@@ -5,7 +5,10 @@ import os
 import sqlite3
 from datetime import datetime, date
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermes.db")
+# Honor HERMES_DB_PATH (Railway volume) so memory survives restarts and redeploys.
+DB_PATH = os.environ.get("HERMES_DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "hermes.db"
+)
 
 
 def _conn() -> sqlite3.Connection:
@@ -46,6 +49,14 @@ def init_db() -> None:
                 telegram_id INTEGER,
                 day         TEXT,
                 note        TEXT,
+                created_at  TEXT
+            );
+            CREATE TABLE IF NOT EXISTS memories (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                category    TEXT DEFAULT 'fact',
+                content     TEXT,
+                source      TEXT DEFAULT 'auto',
                 created_at  TEXT
             );
             CREATE TABLE IF NOT EXISTS messages (
@@ -193,3 +204,69 @@ def recent_messages(tid: int, limit: int) -> list[sqlite3.Row]:
             (tid, limit),
         ).fetchall()
         return list(reversed(rows))
+
+
+# ───────────────────────── prefs (generic per-user settings) ─────────────────────────
+def _ensure_prefs() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS prefs (tid INTEGER, key TEXT, value TEXT, "
+            "PRIMARY KEY (tid, key))"
+        )
+
+
+def set_pref(tid: int, key: str, value: str) -> None:
+    _ensure_prefs()
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO prefs (tid, key, value) VALUES (?,?,?)", (tid, key, value))
+
+
+def get_pref(tid: int, key: str, default: str | None = None) -> str | None:
+    _ensure_prefs()
+    with _conn() as c:
+        row = c.execute("SELECT value FROM prefs WHERE tid=? AND key=?", (tid, key)).fetchone()
+    return row[0] if row else default
+
+
+# ---------- long term memory ----------
+def add_memory(tid: int, content: str, category: str = "fact", source: str = "auto") -> bool:
+    """Store one durable fact. Returns False on empty or duplicate content."""
+    content = (content or "").strip()
+    if not content:
+        return False
+    with _conn() as c:
+        dup = c.execute(
+            "SELECT 1 FROM memories WHERE telegram_id=? AND lower(content)=lower(?)",
+            (tid, content),
+        ).fetchone()
+        if dup:
+            return False
+        c.execute(
+            "INSERT INTO memories (telegram_id, category, content, source, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (tid, category, content, source, datetime.utcnow().isoformat()),
+        )
+    return True
+
+
+def memories_for_prompt(tid: int, limit: int = 48) -> list[sqlite3.Row]:
+    """Most recent N memories, oldest first, for prompt injection."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM memories WHERE telegram_id=? ORDER BY id DESC LIMIT ?",
+            (tid, limit),
+        ).fetchall()
+    return list(reversed(rows))
+
+
+def all_memories(tid: int) -> list[sqlite3.Row]:
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM memories WHERE telegram_id=? ORDER BY id", (tid,)
+        ).fetchall()
+
+
+def delete_memory(tid: int, mem_id: int) -> bool:
+    with _conn() as c:
+        cur = c.execute("DELETE FROM memories WHERE telegram_id=? AND id=?", (tid, mem_id))
+    return cur.rowcount > 0

@@ -1,4 +1,4 @@
-"""All Telegram handlers: commands, menus, program, resources, accountability, coaching.
+"""All Telegram handlers: commands, menus, resources, accountability, assistant replies.
 
 Persona-agnostic. Any name shown to users is pulled from config/persona.yaml
 (coach_name), so this file works for any clone without edits.
@@ -16,9 +16,13 @@ from telegram.ext import (
     filters,
 )
 
+import asyncio
+
 import ai
 import config_loader as cfg
+import connectors
 import database as db
+import tts
 
 # Conversation states tracked in context.user_data
 AWAITING_GOAL = "awaiting_goal"
@@ -27,7 +31,7 @@ AWAITING_CODE = "awaiting_code"
 
 
 def _coach_name() -> str:
-    return cfg.persona().get("coach_name", "the coach")
+    return cfg.persona().get("coach_name", "the assistant")
 
 
 # ───────────────────────── access control ─────────────────────────
@@ -46,7 +50,7 @@ def main_menu() -> InlineKeyboardMarkup:
     feats = cfg.settings().get("features", {})
     rows = []
     if feats.get("coaching", True):
-        rows.append([InlineKeyboardButton("💬 Ask the coach", callback_data="menu:coach")])
+        rows.append([InlineKeyboardButton(f"💬 Ask {_coach_name()}", callback_data="menu:coach")])
     if feats.get("program", True):
         rows.append([InlineKeyboardButton("📚 My program", callback_data="menu:program")])
     if feats.get("resources", True):
@@ -72,7 +76,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if access.get("restrict", False) and not _is_allowed(user.id):
         context.user_data["state"] = AWAITING_CODE
         await update.message.reply_text(
-            f"👋 Welcome! This bot is for {_coach_name()}'s clients. "
+            f"👋 Welcome! This is {_coach_name()}, a private assistant. "
             "Please enter your access code to continue."
         )
         return
@@ -95,12 +99,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = _coach_name()
     await update.message.reply_text(
         "Here's what I can do:\n\n"
-        f"💬 *Ask anything* — just type, and I'll coach you in {name}'s voice.\n"
+        f"💬 *Ask anything*: just type and {name} handles it.\n"
         "📚 /program — work through the program step by step.\n"
         f"🧰 /resources — browse {name}'s videos, PDFs & templates.\n"
         "🎯 /goals — set or view your goals.\n"
         "✅ /checkin — log a check-in and build your streak.\n"
         "⏰ /reminders — turn daily nudges on/off.\n"
+        "🧠 /memories — what I hold in long term memory (/remember, /forget).\n"
+        "🔌 /connectors — which live accounts I am wired into.\n"
         "📋 /menu — show the button menu.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -242,7 +248,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         else:
             await update.message.reply_text(
-                f"That code didn't match. Try again, or contact {_coach_name()}."
+                "That code didn't match. Try again."
             )
         return
 
@@ -269,16 +275,113 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Default: AI coaching
+    # Default: AI assistant reply
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        reply = ai.coach_reply(tid, text)
+        reply = await asyncio.to_thread(ai.coach_reply, tid, text)
     except Exception as e:  # noqa: BLE001
-        reply = ("I hit a snag reaching the coaching brain just now. "
+        reply = ("I hit a snag reaching my brain just now. "
                  "Try again in a moment.")
         context.application.logger.error("AI error: %s", e) if hasattr(context.application, "logger") else None
     await update.message.reply_text(reply)
 
+    # Long term memory upkeep (self-gated, cheap, never blocks the reply)
+    asyncio.create_task(asyncio.to_thread(ai.maybe_extract_memories, tid))
+
+    # Voice note (opt-in via /voice) when ElevenLabs is configured
+    if tts.enabled() and db.get_pref(tid, "voice", "off") == "on":
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action="record_voice"
+        )
+        audio = await asyncio.to_thread(tts.synthesize, reply)
+        if audio:
+            await update.message.reply_voice(voice=audio)
+
+
+# ───────────────────────── voice toggle ─────────────────────────
+async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+    if not tts.enabled():
+        await update.message.reply_text(
+            "Voice isn't switched on for this deployment yet (missing voice key)."
+        )
+        return
+    now_on = db.get_pref(tid, "voice", "off") != "on"
+    db.set_pref(tid, "voice", "on" if now_on else "off")
+    if now_on:
+        await update.message.reply_text(
+            "🎙 Voice notes ON. I'll speak my replies as well as type them. /voice to turn off."
+        )
+    else:
+        await update.message.reply_text("💬 Voice notes OFF. Text only. /voice to turn back on.")
+
+
+
+# ───── memory ─────
+async def memories_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+    mems = db.all_memories(tid)
+    if not mems:
+        await update.message.reply_text(
+            "🧠 Nothing in long term memory yet. It builds itself as we talk, "
+            "or teach me directly: /remember <something worth keeping>."
+        )
+        return
+    lines = ["🧠 *What I'm holding in long term memory:*", ""]
+    for m in mems[-30:]:
+        lines.append(f"#{m['id']} ({m['category']}) {m['content']}")
+    lines.append("")
+    lines.append("_/remember <text> to add · /forget <number> to drop one._")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+    text = " ".join(context.args or []).strip()
+    if not text:
+        await update.message.reply_text("Tell me what to keep: /remember <the thing>.")
+        return
+    if db.add_memory(tid, text, "fact", "manual"):
+        await update.message.reply_text("🧠 Kept. I won't lose it.")
+    else:
+        await update.message.reply_text("Already holding that one.")
+
+
+async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+    arg = (context.args or [""])[0].lstrip("#")
+    if not arg.isdigit():
+        await update.message.reply_text("Give me the number from /memories: /forget 12")
+        return
+    if db.delete_memory(tid, int(arg)):
+        await update.message.reply_text("🗑 Forgotten.")
+    else:
+        await update.message.reply_text("No memory with that number.")
+
+
+# ───── connectors ─────
+async def connectors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+    lines = ["🔌 *Connectors* (read only by design):", ""]
+    lines.extend(connectors.status_lines())
+    lines.append("")
+    lines.append("_Wiring one = adding its credentials as environment variables and redeploying. No code changes._")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 # ───────────────────────── callback buttons ─────────────────────────
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,7 +393,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "menu:home":
         await query.edit_message_text("What would you like to do?", reply_markup=main_menu())
     elif data == "menu:coach":
-        await query.edit_message_text("💬 Go ahead — type your question and I'll coach you through it.")
+        await query.edit_message_text("💬 Go ahead: type what you need and I'm on it.")
     elif data == "menu:program":
         text, kb = _program_view(tid)
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
@@ -339,5 +442,10 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("goals", goals))
     app.add_handler(CommandHandler("checkin", checkin))
     app.add_handler(CommandHandler("reminders", reminders))
+    app.add_handler(CommandHandler("voice", voice_cmd))
+    app.add_handler(CommandHandler("memories", memories_cmd))
+    app.add_handler(CommandHandler("remember", remember_cmd))
+    app.add_handler(CommandHandler("forget", forget_cmd))
+    app.add_handler(CommandHandler("connectors", connectors_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
