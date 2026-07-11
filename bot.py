@@ -14,6 +14,7 @@ import config_loader as cfg
 import database as db
 import handlers
 import notion_watch
+import slack_rhythm
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s", level=logging.INFO
@@ -72,7 +73,14 @@ def main() -> None:
             app.job_queue.run_repeating(send_daily_reminders, interval=60, first=10)
             tz = ZoneInfo(cfg.settings()["bot"]["timezone"])
             app.job_queue.run_daily(send_cold_flags, time=time(hour=7, minute=35, tzinfo=tz))
-            log.info("Reminder scheduler active (cold scan daily 07:35 %s).", tz)
+            # Slack rhythm (Jul 10 meeting): Miles takes over India's internal posts.
+            # Both jobs self-gate on SLACK_BOT_TOKEN + SLACK_AGENDA_CHANNEL.
+            app.job_queue.run_daily(slack_rhythm.morning_agenda, time=time(hour=7, minute=40, tzinfo=tz))
+            app.job_queue.run_daily(slack_rhythm.eod_summary, time=time(hour=18, minute=30, tzinfo=tz))
+            log.info(
+                "Reminder scheduler active (cold scan 07:35, Slack agenda 07:40, EOD 18:30 %s). Slack rhythm %s.",
+                tz, "armed" if slack_rhythm.enabled() else "dormant (env not set)",
+            )
         else:
             log.warning("JobQueue unavailable — install python-telegram-bot[job-queue] for reminders.")
 

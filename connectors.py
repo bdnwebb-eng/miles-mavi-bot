@@ -18,7 +18,11 @@ Currently shipped:
   notion   : Notion REST API (search + read + scoped project writes)
              NOTION_API_KEY  [optional NOTION_PROJECTS_DB_ID for the cold scan]
 
-Adding a connector later (Slack, WhatsApp, Instagram): subclass Connector,
+  slack    : Slack Web API. SLACK_BOT_TOKEN. Read channels + post messages,
+             INTERNAL TEAM ONLY (Jul 10 meeting: Slack is the approved AI
+             notification channel; nothing client facing ever goes there).
+
+Adding a connector later (WhatsApp, Instagram): subclass Connector,
 implement configured() / tools() / run(), append to CONNECTORS.
 
 Trust model: email and calendar are READ ONLY. Notion allows one scoped write:
@@ -509,7 +513,177 @@ class NotionConnector(Connector):
             return f"Error: unknown notion tool {tool_name}."
 
 
-CONNECTORS: list[Connector] = [EmailConnector(), CalendarConnector(), NotionConnector()]
+
+# ───────────────────── slack (Web API, internal team only) ─────────────────────
+class SlackConnector(Connector):
+    name = "slack"
+    _API = "https://slack.com/api"
+
+    def needs(self) -> str:
+        return "SLACK_BOT_TOKEN"
+
+    def configured(self) -> bool:
+        return bool(os.environ.get("SLACK_BOT_TOKEN"))
+
+    def _auth(self) -> dict:
+        return {"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"}
+
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "name": "slack_channels",
+                "description": "List the Slack channels in the team workspace (read only). Returns id, name, is_member.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "slack_read_channel",
+                "description": (
+                    "Read the recent messages of one Slack channel (read only). Accepts a "
+                    "channel id or #name. User ids are resolved to display names."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string", "description": "Channel id (C…) or #name."},
+                        "limit": {"type": "integer", "description": "Messages to return, max 30. Default 15."},
+                    },
+                    "required": ["channel"],
+                },
+            },
+            {
+                "name": "slack_post_message",
+                "description": (
+                    "Post a message to a Slack channel. INTERNAL TEAM ONLY: Slack is the approved "
+                    "AI notification channel (Jul 10 meeting). Never post client facing content, "
+                    "client pricing, or anything meant for someone outside the MAVI team. Always "
+                    "tell the principal exactly what you posted and where."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string", "description": "Channel id (C…) or #name."},
+                        "text": {"type": "string", "description": "The message text (Slack mrkdwn)."},
+                    },
+                    "required": ["channel", "text"],
+                },
+            },
+        ]
+
+    def _call(self, http: httpx.Client, method: str, *, get: bool = False, **params) -> dict:
+        if get:
+            r = http.get(f"{self._API}/{method}", params=params, headers=self._auth())
+        else:
+            r = http.post(f"{self._API}/{method}", json=params, headers=self._auth())
+        r.raise_for_status()
+        return r.json()
+
+    def _channels(self, http: httpx.Client) -> list[dict]:
+        out: list[dict] = []
+        cursor = ""
+        while True:
+            data = self._call(
+                http, "conversations.list", get=True,
+                types="public_channel,private_channel", limit=200,
+                exclude_archived="true", cursor=cursor,
+            )
+            if not data.get("ok"):
+                raise RuntimeError(f"Slack error: {data.get('error')}")
+            out.extend(data.get("channels", []))
+            cursor = (data.get("response_metadata") or {}).get("next_cursor", "")
+            if not cursor:
+                break
+        return out
+
+    def _resolve_channel(self, http: httpx.Client, ref: str) -> str:
+        ref = (ref or "").strip()
+        if re.fullmatch(r"[CGD][A-Z0-9]+", ref):
+            return ref
+        name = ref.lstrip("#").lower()
+        for ch in self._channels(http):
+            if (ch.get("name") or "").lower() == name:
+                return ch["id"]
+        raise RuntimeError(f"no Slack channel named #{name}")
+
+    def _user_map(self, http: httpx.Client) -> dict[str, str]:
+        users: dict[str, str] = {}
+        cursor = ""
+        while True:
+            data = self._call(http, "users.list", get=True, limit=200, cursor=cursor)
+            if not data.get("ok"):
+                return users
+            for u in data.get("members", []):
+                users[u["id"]] = (
+                    (u.get("profile") or {}).get("display_name")
+                    or u.get("real_name")
+                    or u.get("name", u["id"])
+                )
+            cursor = (data.get("response_metadata") or {}).get("next_cursor", "")
+            if not cursor:
+                break
+        return users
+
+    def run(self, tool_name: str, args: dict) -> str:
+        with httpx.Client(timeout=20) as http:
+            if tool_name == "slack_channels":
+                out = [
+                    {"id": ch["id"], "name": ch.get("name", ""), "is_member": bool(ch.get("is_member"))}
+                    for ch in self._channels(http)
+                ]
+                return json.dumps(out, ensure_ascii=False)[:8000]
+
+            if tool_name == "slack_read_channel":
+                cid = self._resolve_channel(http, str(args.get("channel", "")))
+                limit = min(int(args.get("limit", 15) or 15), 30)
+                data = self._call(http, "conversations.history", get=True, channel=cid, limit=limit)
+                if not data.get("ok") and data.get("error") == "not_in_channel":
+                    # Auto join public channels, then retry once.
+                    joined = self._call(http, "conversations.join", channel=cid)
+                    if joined.get("ok"):
+                        data = self._call(http, "conversations.history", get=True, channel=cid, limit=limit)
+                if not data.get("ok"):
+                    return f"Error from Slack: {data.get('error')}"
+                names = self._user_map(http)
+                out = []
+                for m in data.get("messages", []):
+                    try:
+                        when = datetime.fromtimestamp(float(m.get("ts", "0")), LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+                    except (ValueError, OSError, OverflowError):
+                        when = m.get("ts", "")
+                    text = re.sub(
+                        r"<@([A-Z0-9]+)>",
+                        lambda x: "@" + names.get(x.group(1), x.group(1)),
+                        m.get("text", ""),
+                    )
+                    out.append(
+                        {
+                            "when": when,
+                            "from": names.get(m.get("user", ""), m.get("username") or m.get("bot_id") or "bot"),
+                            "text": text[:600],
+                        }
+                    )
+                return json.dumps(out, ensure_ascii=False)[:8000]
+
+            if tool_name == "slack_post_message":
+                cid = self._resolve_channel(http, str(args.get("channel", "")))
+                text = str(args.get("text", "")).strip()
+                if not text:
+                    return "Error: nothing to post."
+                data = self._call(http, "chat.postMessage", channel=cid, text=text)
+                if not data.get("ok") and data.get("error") == "not_in_channel":
+                    joined = self._call(http, "conversations.join", channel=cid)
+                    if joined.get("ok"):
+                        data = self._call(http, "chat.postMessage", channel=cid, text=text)
+                if not data.get("ok"):
+                    return f"Error from Slack: {data.get('error')}"
+                return (
+                    f"Posted to <#{cid}>. Remember: internal team only, and tell the "
+                    "principal exactly what was posted and where."
+                )
+
+            return f"Error: unknown slack tool {tool_name}."
+
+
+CONNECTORS: list[Connector] = [EmailConnector(), CalendarConnector(), NotionConnector(), SlackConnector()]
 
 
 def active() -> list[Connector]:
