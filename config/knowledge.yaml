@@ -1,10 +1,10 @@
-# ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # MILES'S KNOWLEDGE BASE · how he runs Kas's world.
 # v3 · updated 2026-07-11 from the Jul 10 scope meeting and Kas's
 # annotated one pager (tier sheet + writing voice now captured).
 # Injected into the system prompt. Never add facts about Kas,
 # MAVI clients, or pricing that are not in the Brain.
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 
 business_coaching:
   - topic: "The morning brief"
