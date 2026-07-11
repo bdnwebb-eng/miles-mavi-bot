@@ -25,6 +25,13 @@ EXTRACT_EVERY = 8                    # user messages between extraction passes
 EXTRACT_MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_ROUNDS = 5
 
+IMAGE_DEFAULT_INSTRUCTION = (
+    "Kas sent this image. If it is a chat screenshot (WhatsApp, email, etc), identify "
+    "the app, the chat or group name, the date, and what matters; extract any "
+    "commitments, dates, or asks; propose the one next action and offer to draft it. "
+    "Otherwise describe what matters and propose the next action."
+)
+
 
 def _get_client() -> Anthropic:
     global _client
@@ -140,12 +147,17 @@ When a request is clearly outside your scope or sensitive, respond with the spir
 Answer as {name} would: practical, specific, and grounded. Keep replies concise."""
 
 
-def coach_reply(tid: int, user_text: str) -> str:
+def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
+                image_media_type: str = "image/jpeg") -> str:
     """Generate a reply in Miles's voice, with short-term history, long term memory,
-    and live connector tools when they're wired."""
+    and live connector tools when they're wired. When image_b64 is provided (photo
+    handler), the current turn is sent as image + text content blocks."""
     s = cfg.settings().get("ai", {})
     client = _get_client()
 
+    user_text = (user_text or "").strip()
+    if image_b64 and not user_text:
+        user_text = IMAGE_DEFAULT_INSTRUCTION
     db.add_message(tid, "user", user_text)
     history = db.recent_messages(tid, s.get("history_window", 12))
 
@@ -159,6 +171,23 @@ def coach_reply(tid: int, user_text: str) -> str:
     messages = few_shot + [{"role": r["role"], "content": r["content"]} for r in history]
     while messages and messages[0]["role"] != "user":
         messages.pop(0)
+
+    # Photo turn: swap the just-stored text for image + text content blocks.
+    if image_b64 and messages and messages[-1]["role"] == "user":
+        messages[-1] = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image_media_type,
+                        "data": image_b64,
+                    },
+                },
+                {"type": "text", "text": user_text},
+            ],
+        }
 
     kwargs: dict = dict(
         model=s.get("model", "claude-sonnet-4-6"),
