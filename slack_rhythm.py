@@ -119,16 +119,21 @@ def _compose(kind: str, context_text: str) -> str:
     client = ai._get_client()
     if kind == "morning":
         brief = (
-            "Write the 'Morning agenda' post for the MAVI team Slack channel. "
-            "3 to 5 bullets: what's moving today, next actions owed and by whom, "
-            "anything cold that needs a nudge."
+            "Write the morning agenda post for the private #agenda channel, exactly "
+            "the way Kas's human EA India writes it. Open with 'Hi Kas, good morning - "
+            "my agenda includes:' then 3 to 5 bullets: what's moving today, next "
+            "actions owed and by whom, anything cold that needs a nudge."
         )
         header = "*Morning agenda*"
     else:
         brief = (
-            "Write the 'End of day' post for the MAVI team Slack channel. "
-            "Short bullets: what moved today (items edited today on the board), "
-            "and what's open for tomorrow."
+            "Write the end of day summary post for the private #agenda channel, exactly "
+            "the way Kas's human EA India writes it. Open with 'Hi Kas, here is the EOD "
+            "summary for <weekday, day month>:' then short sections with bold labels "
+            "such as *Kas Emails :* and *Leads / Clients:*, one bullet per item, ending "
+            "urgent items with a red circle emoji and waiting items with a yellow circle "
+            "emoji. Cover what moved today (items edited today on the board) and what's "
+            "open for tomorrow."
         )
         header = "*End of day*"
     prompt = (
