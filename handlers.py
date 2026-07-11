@@ -105,6 +105,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎯 /goals — set or view your goals.\n"
         "✅ /checkin — log a check-in and build your streak.\n"
         "⏰ /reminders — turn daily nudges on/off.\n"
+        "🔋 /energy — log today's energy 1 to 10, I map the pattern.\n"
         "🧠 /memories — what I hold in long term memory (/remember, /forget).\n"
         "🔌 /connectors — which live accounts I am wired into.\n"
         "📋 /menu — show the button menu.",
@@ -433,6 +434,38 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ───────────────────────── registration ─────────────────────────
+
+async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        return
+    args = context.args or []
+    if args and args[0].isdigit() and 1 <= int(args[0]) <= 10:
+        score = int(args[0])
+        note = " ".join(args[1:])[:200]
+        db.add_energy(tid, score, note)
+        hist = db.energy_history(tid, 30)
+        avg = round(sum(r[1] for r in hist) / len(hist), 1)
+        low_days = [r[0][5:] for r in hist if r[1] <= 4][-3:]
+        msg = f"Logged: {score}/10 today."
+        if note:
+            msg += f" Noted: {note}."
+        msg += f"\n30 day average: {avg}/10 across {len(hist)} day(s)."
+        if low_days:
+            msg += f" Low days recently: {', '.join(low_days)}."
+        if score <= 4:
+            msg += "\nLow energy day, Kas. Tell me what to lighten and I'll move what can move."
+        await update.message.reply_text(msg)
+        return
+    hist = db.energy_history(tid, 30)
+    if not hist:
+        await update.message.reply_text("Log your first score: /energy 7 (add a note if you like: /energy 7 long client day).")
+        return
+    lines = [f"{r[0][5:]}: {'▪' * r[1]} {r[1]}/10" + (f" · {r[2]}" if r[2] else "") for r in hist[-14:]]
+    avg = round(sum(r[1] for r in hist) / len(hist), 1)
+    await update.message.reply_text("Energy, last 14 logged days:\n" + "\n".join(lines) + f"\n\nAverage: {avg}/10. Log today: /energy 1-10.")
+
+
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
@@ -447,5 +480,6 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("connectors", connectors_cmd))
+    app.add_handler(CommandHandler("energy", energy_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))

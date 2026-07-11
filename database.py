@@ -270,3 +270,29 @@ def delete_memory(tid: int, mem_id: int) -> bool:
     with _conn() as c:
         cur = c.execute("DELETE FROM memories WHERE telegram_id=? AND id=?", (tid, mem_id))
     return cur.rowcount > 0
+
+
+# ───────────────────────── energy tracking (Jul 10 meeting: daily score, pattern mapping) ─────────────────────────
+def _ensure_energy() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS energy (tid INTEGER, day TEXT, score INTEGER, "
+            "note TEXT DEFAULT '', PRIMARY KEY (tid, day))"
+        )
+
+
+def add_energy(tid: int, score: int, note: str = "") -> None:
+    _ensure_energy()
+    from datetime import datetime
+    day = datetime.now().strftime("%Y-%m-%d")
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO energy (tid, day, score, note) VALUES (?,?,?,?)", (tid, day, score, note))
+
+
+def energy_history(tid: int, days: int = 30) -> list:
+    _ensure_energy()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT day, score, note FROM energy WHERE tid=? ORDER BY day DESC LIMIT ?", (tid, days)
+        ).fetchall()
+    return list(reversed(rows))
