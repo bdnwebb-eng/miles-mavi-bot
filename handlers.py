@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 
 import asyncio
+import base64
 
 import ai
 import config_loader as cfg
@@ -299,6 +300,46 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_voice(voice=audio)
 
 
+# ───────────────────────── photos & screenshots ─────────────────────────
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kas forwards a screenshot (WhatsApp, email, anything); Miles reads it, names
+    the app / group / date, pulls out commitments and asks, proposes the next action."""
+    tid = update.effective_user.id
+    if context.user_data.get("state") == AWAITING_CODE or not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    caption = (update.message.caption or "").strip()
+    try:
+        photo = update.message.photo[-1]  # largest rendition Telegram offers
+        file = await photo.get_file()
+        data = await file.download_as_bytearray()
+        if len(data) > 4 * 1024 * 1024:
+            await update.message.reply_text(
+                "That image is heavier than I can read here. Send it a touch smaller."
+            )
+            return
+        image_b64 = base64.b64encode(bytes(data)).decode("ascii")
+        reply = await asyncio.to_thread(ai.coach_reply, tid, caption, image_b64, "image/jpeg")
+    except Exception as e:  # noqa: BLE001
+        reply = "I hit a snag reading that image. Try sending it again in a moment."
+        context.application.logger.error("Photo error: %s", e) if hasattr(context.application, "logger") else None
+    await update.message.reply_text(reply)
+
+    # Long term memory upkeep (self-gated, cheap, never blocks the reply)
+    asyncio.create_task(asyncio.to_thread(ai.maybe_extract_memories, tid))
+
+    # Voice note (opt-in via /voice) when ElevenLabs is configured
+    if tts.enabled() and db.get_pref(tid, "voice", "off") == "on":
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action="record_voice"
+        )
+        audio = await asyncio.to_thread(tts.synthesize, reply)
+        if audio:
+            await update.message.reply_voice(voice=audio)
+
+
 # ───────────────────────── voice toggle ─────────────────────────
 async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
@@ -482,4 +523,5 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("connectors", connectors_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
