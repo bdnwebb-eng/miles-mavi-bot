@@ -15,6 +15,7 @@ import database as db
 import handlers
 import notion_watch
 import slack_rhythm
+import slack_socket
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s", level=logging.INFO
@@ -83,6 +84,10 @@ def main() -> None:
             )
         else:
             log.warning("JobQueue unavailable — install python-telegram-bot[job-queue] for reminders.")
+
+    # v3.3: Slack Socket Mode responder (team mentions + DMs), env gated.
+    if slack_socket.start():
+        log.info("Slack socket: armed (mentions + DMs via Socket Mode).")
 
     log.info("Hermes is running. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=["message", "callback_query"])
