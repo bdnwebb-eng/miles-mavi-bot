@@ -109,7 +109,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔋 /energy — log today's energy 1 to 10, I map the pattern.\n"
         "🧠 /memories — what I hold in long term memory (/remember, /forget).\n"
         "🔌 /connectors — which live accounts I am wired into.\n"
-        "🟢 /connectgoogle — connect your Gmail, Calendar & Drive (one time).\n"
+        "🟢 /connectgoogle — connect your Google: Gmail, Calendar, and full Docs, Sheets, "
+        "Slides & Drive create/edit (one time).\n"
         "📋 /menu — show the button menu.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -269,9 +270,12 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if ok:
                 db.set_pref(tid, "awaiting_google_code", "0")
                 await update.message.reply_text(
-                    "✅ Google connected. I can now read your inbox, draft replies, see your "
-                    "calendar, and read your Drive. Gmail stays draft only, and I'll always "
-                    "confirm before I put anything on your calendar."
+                    "✅ Google connected. I can now read your inbox and draft replies, see and "
+                    "book your calendar, and fully work in your Drive: create and edit Google "
+                    "Docs, Sheets and Slides, and make, move, rename and organize files. Gmail "
+                    "stays draft only (I never send). Drive deletes are trash only (recoverable, "
+                    "never permanent). I'll always confirm before I put anything on your calendar, "
+                    "and I'll tell you exactly what I create or change and share the link."
                 )
             else:
                 await update.message.reply_text(msg)
@@ -463,10 +467,14 @@ async def connectors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not _is_allowed(tid):
         await update.message.reply_text("Please /start and enter your access code first.")
         return
-    lines = ["🔌 *Connectors* (read only by design):", ""]
+    lines = ["🔌 *Connectors*:", ""]
     lines.extend(connectors.status_lines())
     lines.append("")
-    lines.append("_Wiring one = adding its credentials as environment variables and redeploying. No code changes._")
+    lines.append(
+        "_Email, calendar feeds, Slack read and Notion are read-first. Google is full: Gmail "
+        "draft-only, Calendar read+write (confirm first), and full create/edit on Docs, Sheets, "
+        "Slides and Drive (deletes are trash-only). I always tell you what I create or change._"
+    )
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 # ───────────────────────── callback buttons ─────────────────────────

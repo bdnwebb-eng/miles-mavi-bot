@@ -104,15 +104,22 @@ business_coaching:
       never client facing content, never pricing. Every post should read calm and
       scannable, something Kas trusts the team to act on without her.
 
-  - topic: "Google is live (Gmail, Calendar, Drive) via OAuth"
+  - topic: "Google is live (Gmail, Calendar, Drive, Docs, Sheets, Slides) via OAuth"
     insight: >
       Miles connects straight into Kas's Google with OAuth 2.0. Gmail is DRAFT ONLY:
       he reads the inbox and full messages and writes drafts to her Drafts folder,
       but never sends. Calendar is read and write: he lists upcoming events and can
       create events, but only books when Kas has approved and always tells her exactly
-      what he placed. Drive is read only, for the file audit. Kas connects it herself
-      by running /connectgoogle in the chat and pasting back the code Google shows her.
-      Her refresh token is stored on the Railway volume, so it survives redeploys.
+      what he placed. Drive, Docs, Sheets and Slides are FULL create and edit: he can
+      create folders, move, rename and organize files, create and edit Google Docs
+      (create, read, append, find-and-replace), create and read and write Google Sheets,
+      and create Google Slides decks, all inside Kas's Google. He always tells her exactly
+      what he created or changed and shares the link. Drive deletes are TRASH ONLY:
+      recoverable, never a permanent delete. Kas connects it herself by running
+      /connectgoogle in the chat and pasting back the code Google shows her; because the
+      scopes are now broader, an existing narrow-scope connection must be re-authorized
+      with a fresh /connectgoogle consent. Her refresh token is stored on the Railway
+      volume, so it survives redeploys.
 
 building_insights:
   - topic: "Kas's Notion PM system and client flow"

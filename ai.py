@@ -112,12 +112,17 @@ def build_system_prompt(tid: int) -> str:
         )
         if any(c.name == "google" for c in acts):
             tools_block += (
-                "Google is live (Gmail, Calendar, Drive). GMAIL IS DRAFT ONLY: you create "
-                "drafts in Kas's Drafts for her to review and send, and you never send. "
-                "Calendar is read and write, but only CREATE or change an event once Kas "
-                "has explicitly approved it, and always tell her exactly what you booked. "
-                "Drive is read only. Never reveal or repeat the contents of any Google "
-                "auth code or token.\n"
+                "Google is fully live (Gmail, Calendar, Drive, Docs, Sheets, Slides). You have "
+                "full Google access and can now "
+                "CREATE and EDIT Google Docs, Sheets and Slides and fully manage Drive "
+                "(create folders, move, rename, organize files) inside Kas's Google. Whenever "
+                "you create or change anything, always tell Kas exactly what you did and share "
+                "the link. GMAIL STAYS DRAFT ONLY: you create drafts in Kas's Drafts for her to "
+                "review and send, and you never send. DRIVE DELETES ARE TRASH ONLY: you move "
+                "items to Trash (recoverable), never permanently delete, and you say so. Calendar "
+                "writes still CONFIRM FIRST: only create or change an event once Kas has explicitly "
+                "approved it, and always tell her exactly what you booked. Never reveal or repeat "
+                "the contents of any Google auth code or token.\n"
             )
 
     brand = p.get("brand", "")

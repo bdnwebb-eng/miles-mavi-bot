@@ -688,8 +688,12 @@ class GoogleConnector(Connector):
     """Live Google via OAuth 2.0. Miles mints and stores his own refresh token
     (see /connectgoogle): no secret ever passes through a human. Gmail is DRAFT
     ONLY (Miles drafts, Kas sends). Calendar is read + write (writes only when Kas
-    has approved). Drive is read only (the audit). The refresh token lives in the
-    sqlite google_auth table on the Railway volume, so it survives redeploys."""
+    has approved). Drive, Docs, Sheets and Slides are FULL create + edit: Miles
+    can create folders, move/rename files, create and edit documents, spreadsheets
+    and presentations inside Kas's Google. He always announces what he created or
+    changed and shares the link. Drive deletes are trash only (recoverable), never
+    permanent. The refresh token lives in the sqlite google_auth table on the
+    Railway volume, so it survives redeploys."""
 
     name = "google"
     _TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -697,6 +701,9 @@ class GoogleConnector(Connector):
     _GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
     _CAL = "https://www.googleapis.com/calendar/v3"
     _DRIVE = "https://www.googleapis.com/drive/v3"
+    _DOCS = "https://docs.googleapis.com/v1/documents"
+    _SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
+    _SLIDES = "https://slides.googleapis.com/v1/presentations"
     # Desktop OAuth client: Google has retired the OOB (urn:ietf:wg:oauth:2.0:oob)
     # redirect for newly created clients, so we use the loopback redirect and have Kas
     # copy the "code" param out of the localhost URL after she approves. No local
@@ -706,7 +713,10 @@ class GoogleConnector(Connector):
     SCOPES = [
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/calendar",
-        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/presentations",
     ]
 
     def __init__(self) -> None:
@@ -848,6 +858,21 @@ class GoogleConnector(Connector):
             return re.sub(r"<[^>]+>", " ", cls._b64url_decode(data))
         return ""
 
+    @staticmethod
+    def _docs_plain_text(doc: dict) -> str:
+        """Flatten a Google Docs document resource body to plain text."""
+        out: list[str] = []
+        for el in ((doc.get("body") or {}).get("content") or []):
+            para = el.get("paragraph")
+            if not para:
+                continue
+            line = ""
+            for pe in para.get("elements", []) or []:
+                tr = pe.get("textRun") or {}
+                line += tr.get("content", "")
+            out.append(line)
+        return "".join(out)
+
     def tools(self) -> list[dict]:
         return [
             {
@@ -913,11 +938,160 @@ class GoogleConnector(Connector):
             },
             {
                 "name": "drive_search",
-                "description": "Search Kas's Google Drive by file name (read only). Returns name/id/mimeType/modifiedTime/webViewLink. For the Drive audit.",
+                "description": "Search Kas's Google Drive by file name (excludes trashed files). Returns name/id/mimeType/modifiedTime/webViewLink.",
                 "input_schema": {
                     "type": "object",
                     "properties": {"query": {"type": "string", "description": "Text to match in file names."}},
                     "required": ["query"],
+                },
+            },
+            {
+                "name": "drive_create_folder",
+                "description": "Create a folder in Kas's Google Drive. Miles is acting inside Kas's Google: announce the folder you made and give her the link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Folder name."},
+                        "parent_id": {"type": "string", "description": "Optional parent folder id. Default: My Drive root."},
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "drive_move",
+                "description": "Move a file or folder in Kas's Drive to a new parent folder. Announce what you moved and where.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string", "description": "The file or folder id to move."},
+                        "new_parent_id": {"type": "string", "description": "The destination folder id."},
+                    },
+                    "required": ["file_id", "new_parent_id"],
+                },
+            },
+            {
+                "name": "drive_rename",
+                "description": "Rename a file or folder in Kas's Drive. Announce the new name.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string", "description": "The file or folder id."},
+                        "new_name": {"type": "string", "description": "The new name."},
+                    },
+                    "required": ["file_id", "new_name"],
+                },
+            },
+            {
+                "name": "drive_trash",
+                "description": "Move a file or folder in Kas's Drive to the trash. This is a SOFT delete: it is recoverable from Trash for 30 days and is NEVER a permanent delete. Always tell Kas you moved it to trash and that she can restore it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string", "description": "The file or folder id to move to trash."},
+                    },
+                    "required": ["file_id"],
+                },
+            },
+            {
+                "name": "docs_create",
+                "description": "Create a new Google Doc in Kas's Drive, optionally with starting body text. Miles is acting inside Kas's Google: announce the doc you created and share its link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Document title."},
+                        "body_text": {"type": "string", "description": "Optional starting body text."},
+                    },
+                    "required": ["title"],
+                },
+            },
+            {
+                "name": "docs_read",
+                "description": "Read the full plain text of one Google Doc by id.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"document_id": {"type": "string", "description": "The Google Doc id."}},
+                    "required": ["document_id"],
+                },
+            },
+            {
+                "name": "docs_append",
+                "description": "Append text to the end of an existing Google Doc in Kas's Drive. Announce what you added and share the link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "document_id": {"type": "string", "description": "The Google Doc id."},
+                        "text": {"type": "string", "description": "Text to append at the end of the doc."},
+                    },
+                    "required": ["document_id", "text"],
+                },
+            },
+            {
+                "name": "docs_replace",
+                "description": "Find and replace all occurrences of text in a Google Doc in Kas's Drive. Announce what you changed and share the link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "document_id": {"type": "string", "description": "The Google Doc id."},
+                        "find": {"type": "string", "description": "Exact text to find."},
+                        "replace": {"type": "string", "description": "Text to replace it with."},
+                    },
+                    "required": ["document_id", "find", "replace"],
+                },
+            },
+            {
+                "name": "sheets_create",
+                "description": "Create a new Google Sheet in Kas's Drive. Miles is acting inside Kas's Google: announce the sheet you created and share its link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string", "description": "Spreadsheet title."}},
+                    "required": ["title"],
+                },
+            },
+            {
+                "name": "sheets_read",
+                "description": "Read a cell range from a Google Sheet. Returns rows of values.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "spreadsheet_id": {"type": "string", "description": "The spreadsheet id."},
+                        "range": {"type": "string", "description": "A1 range, e.g. 'A1:Z100' or 'Sheet1!A1:D20'. Default 'A1:Z100'."},
+                    },
+                    "required": ["spreadsheet_id"],
+                },
+            },
+            {
+                "name": "sheets_write",
+                "description": "Write a 2D array of values to a range in a Google Sheet (overwrites that range). Announce what you wrote and share the link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "spreadsheet_id": {"type": "string", "description": "The spreadsheet id."},
+                        "range": {"type": "string", "description": "A1 range to write to, e.g. 'A1' or 'Sheet1!A1'."},
+                        "values_json": {"type": "string", "description": "JSON string of rows, a 2D array e.g. [[\"Name\",\"Amount\"],[\"Rug\",1200]]."},
+                    },
+                    "required": ["spreadsheet_id", "range", "values_json"],
+                },
+            },
+            {
+                "name": "sheets_append",
+                "description": "Append rows of values to a Google Sheet after the last row of a range. Announce what you added and share the link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "spreadsheet_id": {"type": "string", "description": "The spreadsheet id."},
+                        "range": {"type": "string", "description": "A1 range that anchors the table, e.g. 'A1' or 'Sheet1!A1'."},
+                        "values_json": {"type": "string", "description": "JSON string of rows to append, a 2D array."},
+                    },
+                    "required": ["spreadsheet_id", "range", "values_json"],
+                },
+            },
+            {
+                "name": "slides_create",
+                "description": "Create a new Google Slides presentation in Kas's Drive. Miles is acting inside Kas's Google: announce the deck you created and share its link.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string", "description": "Presentation title."}},
+                    "required": ["title"],
                 },
             },
         ]
@@ -1065,6 +1239,200 @@ class GoogleConnector(Connector):
                     return f"Error from Drive: {r.text[:300]}"
                 return json.dumps(r.json().get("files", []), ensure_ascii=False)[:6000]
 
+            if tool_name == "drive_create_folder":
+                name = str(args.get("name", "")).strip()
+                if not name:
+                    return "Error: need a folder name."
+                body_payload = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+                parent = str(args.get("parent_id", "") or "").strip()
+                if parent:
+                    body_payload["parents"] = [parent]
+                r = http.post(f"{self._DRIVE}/files", headers=h,
+                              params={"fields": "id,name,webViewLink"}, json=body_payload)
+                if r.status_code >= 400:
+                    return f"Error creating folder: {r.text[:300]}"
+                f = r.json()
+                return (f"Created folder '{f.get('name', name)}' (id {f.get('id','')}) in Kas's Drive: "
+                        f"{f.get('webViewLink','')}. Tell Kas you made it and share the link.")
+
+            if tool_name == "drive_move":
+                fid = str(args.get("file_id", "")).strip()
+                new_parent = str(args.get("new_parent_id", "")).strip()
+                if not (fid and new_parent):
+                    return "Error: need file_id and new_parent_id."
+                # look up current parents so we can remove them
+                g = http.get(f"{self._DRIVE}/files/{fid}", headers=h, params={"fields": "parents,name"})
+                if g.status_code >= 400:
+                    return f"Error reading file: {g.text[:300]}"
+                cur = g.json()
+                old_parents = ",".join(cur.get("parents", []) or [])
+                r = http.patch(f"{self._DRIVE}/files/{fid}", headers=h, params={
+                    "addParents": new_parent,
+                    "removeParents": old_parents,
+                    "fields": "id,name,parents,webViewLink",
+                })
+                if r.status_code >= 400:
+                    return f"Error moving file: {r.text[:300]}"
+                f = r.json()
+                return (f"Moved '{f.get('name','')}' into folder {new_parent}. {f.get('webViewLink','')}. "
+                        "Tell Kas what you moved and where.")
+
+            if tool_name == "drive_rename":
+                fid = str(args.get("file_id", "")).strip()
+                new_name = str(args.get("new_name", "")).strip()
+                if not (fid and new_name):
+                    return "Error: need file_id and new_name."
+                r = http.patch(f"{self._DRIVE}/files/{fid}", headers=h,
+                               params={"fields": "id,name,webViewLink"}, json={"name": new_name})
+                if r.status_code >= 400:
+                    return f"Error renaming file: {r.text[:300]}"
+                f = r.json()
+                return (f"Renamed to '{f.get('name', new_name)}'. {f.get('webViewLink','')}. "
+                        "Tell Kas the new name.")
+
+            if tool_name == "drive_trash":
+                fid = str(args.get("file_id", "")).strip()
+                if not fid:
+                    return "Error: need file_id."
+                r = http.patch(f"{self._DRIVE}/files/{fid}", headers=h,
+                               params={"fields": "id,name"}, json={"trashed": True})
+                if r.status_code >= 400:
+                    return f"Error trashing file: {r.text[:300]}"
+                f = r.json()
+                return (f"Moved '{f.get('name','')}' to Kas's Drive Trash. This is recoverable from "
+                        "Trash for 30 days, not a permanent delete. Tell Kas you trashed it and that "
+                        "she can restore it.")
+
+            if tool_name == "docs_create":
+                title = str(args.get("title", "")).strip()
+                if not title:
+                    return "Error: need a document title."
+                r = http.post(self._DOCS, headers=h, json={"title": title})
+                if r.status_code >= 400:
+                    return f"Error creating doc: {r.text[:300]}"
+                doc_id = r.json().get("documentId", "")
+                body_text = str(args.get("body_text", "") or "")
+                if body_text and doc_id:
+                    ur = http.post(f"{self._DOCS}/{doc_id}:batchUpdate", headers=h, json={
+                        "requests": [{"insertText": {"location": {"index": 1}, "text": body_text}}]
+                    })
+                    if ur.status_code >= 400:
+                        return (f"Created doc '{title}' (id {doc_id}) but couldn't add the body text "
+                                f"({ur.text[:150]}). Link: https://docs.google.com/document/d/{doc_id}/edit")
+                link = f"https://docs.google.com/document/d/{doc_id}/edit"
+                return (f"Created Google Doc '{title}' (id {doc_id}) in Kas's Drive: {link}. "
+                        "Tell Kas you made it and share the link.")
+
+            if tool_name == "docs_read":
+                doc_id = str(args.get("document_id", "")).strip()
+                if not doc_id:
+                    return "Error: need a document_id."
+                r = http.get(f"{self._DOCS}/{doc_id}", headers=h)
+                if r.status_code >= 400:
+                    return f"Error reading doc: {r.text[:300]}"
+                return self._docs_plain_text(r.json())[:6000] or "(doc has no readable text)"
+
+            if tool_name == "docs_append":
+                doc_id = str(args.get("document_id", "")).strip()
+                text = str(args.get("text", ""))
+                if not (doc_id and text):
+                    return "Error: need document_id and text."
+                r = http.post(f"{self._DOCS}/{doc_id}:batchUpdate", headers=h, json={
+                    "requests": [{"insertText": {"endOfSegmentLocation": {}, "text": text}}]
+                })
+                if r.status_code >= 400:
+                    return f"Error appending to doc: {r.text[:300]}"
+                link = f"https://docs.google.com/document/d/{doc_id}/edit"
+                return f"Appended your text to the doc: {link}. Tell Kas what you added and share the link."
+
+            if tool_name == "docs_replace":
+                doc_id = str(args.get("document_id", "")).strip()
+                find = str(args.get("find", ""))
+                replace = str(args.get("replace", ""))
+                if not (doc_id and find):
+                    return "Error: need document_id and the text to find."
+                r = http.post(f"{self._DOCS}/{doc_id}:batchUpdate", headers=h, json={
+                    "requests": [{"replaceAllText": {
+                        "containsText": {"text": find, "matchCase": True},
+                        "replaceText": replace,
+                    }}]
+                })
+                if r.status_code >= 400:
+                    return f"Error editing doc: {r.text[:300]}"
+                occ = 0
+                for rep in (r.json().get("replies") or []):
+                    occ += ((rep.get("replaceAllText") or {}).get("occurrencesChanged") or 0)
+                link = f"https://docs.google.com/document/d/{doc_id}/edit"
+                return (f"Replaced {occ} occurrence(s) of that text in the doc: {link}. "
+                        "Tell Kas what you changed and share the link.")
+
+            if tool_name == "sheets_create":
+                title = str(args.get("title", "")).strip()
+                if not title:
+                    return "Error: need a spreadsheet title."
+                r = http.post(self._SHEETS, headers=h, json={"properties": {"title": title}})
+                if r.status_code >= 400:
+                    return f"Error creating sheet: {r.text[:300]}"
+                j = r.json()
+                sid = j.get("spreadsheetId", "")
+                link = j.get("spreadsheetUrl") or f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+                return (f"Created Google Sheet '{title}' (id {sid}) in Kas's Drive: {link}. "
+                        "Tell Kas you made it and share the link.")
+
+            if tool_name == "sheets_read":
+                sid = str(args.get("spreadsheet_id", "")).strip()
+                rng = str(args.get("range", "") or "A1:Z100").strip() or "A1:Z100"
+                if not sid:
+                    return "Error: need a spreadsheet_id."
+                r = http.get(f"{self._SHEETS}/{sid}/values/{quote(rng, safe='!:')}", headers=h)
+                if r.status_code >= 400:
+                    return f"Error reading sheet: {r.text[:300]}"
+                return json.dumps(r.json().get("values", []), ensure_ascii=False)[:6000]
+
+            if tool_name in ("sheets_write", "sheets_append"):
+                sid = str(args.get("spreadsheet_id", "")).strip()
+                rng = str(args.get("range", "")).strip()
+                if not (sid and rng):
+                    return "Error: need spreadsheet_id and range."
+                try:
+                    values = json.loads(str(args.get("values_json", "")))
+                    if not isinstance(values, list):
+                        raise ValueError
+                    if values and not isinstance(values[0], list):
+                        values = [values]
+                except (json.JSONDecodeError, ValueError):
+                    return "Error: values_json must be a JSON 2D array, e.g. [[\"A\",\"B\"],[1,2]]."
+                enc_rng = quote(rng, safe="!:")
+                if tool_name == "sheets_write":
+                    r = http.put(f"{self._SHEETS}/{sid}/values/{enc_rng}", headers=h,
+                                 params={"valueInputOption": "USER_ENTERED"}, json={"values": values})
+                    if r.status_code >= 400:
+                        return f"Error writing to sheet: {r.text[:300]}"
+                    updated = (r.json() or {}).get("updatedCells", "?")
+                    verb = f"Wrote {updated} cell(s) to"
+                else:
+                    r = http.post(f"{self._SHEETS}/{sid}/values/{enc_rng}:append", headers=h,
+                                  params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
+                                  json={"values": values})
+                    if r.status_code >= 400:
+                        return f"Error appending to sheet: {r.text[:300]}"
+                    updated = ((r.json() or {}).get("updates") or {}).get("updatedCells", "?")
+                    verb = f"Appended {updated} cell(s) to"
+                link = f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+                return f"{verb} range {rng} of the sheet: {link}. Tell Kas what you changed and share the link."
+
+            if tool_name == "slides_create":
+                title = str(args.get("title", "")).strip()
+                if not title:
+                    return "Error: need a presentation title."
+                r = http.post(self._SLIDES, headers=h, json={"title": title})
+                if r.status_code >= 400:
+                    return f"Error creating presentation: {r.text[:300]}"
+                pid = r.json().get("presentationId", "")
+                link = f"https://docs.google.com/presentation/d/{pid}/edit"
+                return (f"Created Google Slides deck '{title}' (id {pid}) in Kas's Drive: {link}. "
+                        "Tell Kas you made it and share the link.")
+
             return f"Error: unknown google tool {tool_name}."
 
 
@@ -1092,14 +1460,15 @@ def dispatch(tool_name: str, args: dict) -> str:
     return f"Error: tool {tool_name} is not wired."
 
 
+# v5: Google broadened to full Drive/Docs/Sheets/Slides create+edit (2026-07-16)
 def status_lines() -> list[str]:
     lines = []
     for c in CONNECTORS:
         if c.name == "google":
             if c.configured():
-                lines.append("🟢 google: wired and live (Gmail draft-only, Calendar read+write, Drive read)")
+                lines.append("\U0001f7e2 google: wired and live (Gmail draft-only, Calendar read+write, Drive/Docs/Sheets/Slides full create+edit, Drive delete=trash-only)")
             elif GoogleConnector._has_app():
-                lines.append("🟡 google: app ready, run /connectgoogle to connect Kas's account")
+                lines.append("\U0001f7e1 google: app ready, run /connectgoogle to connect Kas's account")
             else:
                 lines.append(f"⚪ google: not wired yet (needs {c.needs()})")
             continue
@@ -1109,7 +1478,7 @@ def status_lines() -> list[str]:
                 extra = f" ({len(EmailConnector._accounts())} account(s))"
             if c.name == "calendar":
                 extra = f" ({len(CalendarConnector._feeds())} feed(s))"
-            lines.append(f"🟢 {c.name}: wired and live (read only){extra}")
+            lines.append(f"\U0001f7e2 {c.name}: wired and live (read only){extra}")
         else:
             lines.append(f"⚪ {c.name}: not wired yet (needs {c.needs()})")
     return lines
