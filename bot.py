@@ -16,6 +16,7 @@ import handlers
 import notion_watch
 import slack_rhythm
 import slack_socket
+import web_api
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s", level=logging.INFO
@@ -57,6 +58,17 @@ async def send_cold_flags(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     load_dotenv()
+    print("[bot] main() entered", flush=True)
+
+    # v5.2: read-only live JSON API for the Miles command dashboard. Started FIRST
+    # (daemon thread, stdlib http.server) so /health and /api/dashboard are reachable
+    # regardless of the rest of boot. Never touches the PTB asyncio loop.
+    try:
+        web_api.start()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Dashboard API failed to start: %s", e)
+        print(f"[web_api] FAILED to start: {e}", flush=True)
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill it in.")
