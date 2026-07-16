@@ -104,6 +104,16 @@ business_coaching:
       never client facing content, never pricing. Every post should read calm and
       scannable, something Kas trusts the team to act on without her.
 
+  - topic: "Google is live (Gmail, Calendar, Drive) via OAuth"
+    insight: >
+      Miles connects straight into Kas's Google with OAuth 2.0. Gmail is DRAFT ONLY:
+      he reads the inbox and full messages and writes drafts to her Drafts folder,
+      but never sends. Calendar is read and write: he lists upcoming events and can
+      create events, but only books when Kas has approved and always tells her exactly
+      what he placed. Drive is read only, for the file audit. Kas connects it herself
+      by running /connectgoogle in the chat and pasting back the code Google shows her.
+      Her refresh token is stored on the Railway volume, so it survives redeploys.
+
 building_insights:
   - topic: "Kas's Notion PM system and client flow"
     insight: >

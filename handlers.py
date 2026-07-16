@@ -109,6 +109,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔋 /energy — log today's energy 1 to 10, I map the pattern.\n"
         "🧠 /memories — what I hold in long term memory (/remember, /forget).\n"
         "🔌 /connectors — which live accounts I am wired into.\n"
+        "🟢 /connectgoogle — connect your Gmail, Calendar & Drive (one time).\n"
         "📋 /menu — show the button menu.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -257,6 +258,24 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not _is_allowed(tid):
         await update.message.reply_text("Please /start and enter your access code first.")
         return
+
+    # Google OAuth code capture: after /connectgoogle, the next code-looking message
+    # is the authorization code Kas pasted back. Exchange it for a refresh token.
+    if db.get_pref(tid, "awaiting_google_code", "0") == "1":
+        t = text.strip()
+        codelike = ("code=" in t) or t.startswith("4/") or (len(t) > 15 and " " not in t)
+        if codelike:
+            ok, msg = await asyncio.to_thread(connectors.GoogleConnector.exchange_code, tid, text)
+            if ok:
+                db.set_pref(tid, "awaiting_google_code", "0")
+                await update.message.reply_text(
+                    "✅ Google connected. I can now read your inbox, draft replies, see your "
+                    "calendar, and read your Drive. Gmail stays draft only, and I'll always "
+                    "confirm before I put anything on your calendar."
+                )
+            else:
+                await update.message.reply_text(msg)
+            return
 
     if state == AWAITING_GOAL:
         db.add_goal(tid, text)
@@ -413,6 +432,31 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("No memory with that number.")
 
 
+# ───── google oauth (self-serve connect) ─────
+async def connectgoogle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+    if not connectors.GoogleConnector._has_app():
+        await update.message.reply_text(
+            "Google isn't set up on my side yet (missing app credentials). Flag it to Brandon."
+        )
+        return
+    url = connectors.GoogleConnector.auth_url()
+    db.set_pref(tid, "awaiting_google_code", "1")
+    await update.message.reply_text(
+        "Let's connect your Google. Three quick steps:\n\n"
+        "1. Open this and approve as kas@maviliving.com:\n"
+        f"{url}\n\n"
+        "2. After you approve, the browser will try to open a localhost page that "
+        "won't load. That's expected. Copy the whole address from the address bar "
+        "(or just the part after code=).\n\n"
+        "3. Send it back to me here and I'll finish connecting.",
+        disable_web_page_preview=True,
+    )
+
+
 # ───── connectors ─────
 async def connectors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
@@ -521,6 +565,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("connectors", connectors_cmd))
+    app.add_handler(CommandHandler("connectgoogle", connectgoogle_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))

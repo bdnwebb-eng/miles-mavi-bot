@@ -296,3 +296,42 @@ def energy_history(tid: int, days: int = 30) -> list:
             "SELECT day, score, note FROM energy WHERE tid=? ORDER BY day DESC LIMIT ?", (tid, days)
         ).fetchall()
     return list(reversed(rows))
+
+
+# ───────────────────────── google oauth (refresh token on the Railway volume) ─────────────────────────
+def _ensure_google_auth() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS google_auth (tid INTEGER PRIMARY KEY, "
+            "refresh_token TEXT, scopes TEXT, created TEXT)"
+        )
+
+
+def set_google_auth(tid: int, refresh_token: str, scopes: str) -> None:
+    """Store (or replace) the Google refresh token for a user. Survives redeploys."""
+    _ensure_google_auth()
+    with _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO google_auth (tid, refresh_token, scopes, created) "
+            "VALUES (?,?,?,?)",
+            (tid, refresh_token, scopes, datetime.utcnow().isoformat()),
+        )
+
+
+def get_google_refresh_token(tid: int) -> str | None:
+    _ensure_google_auth()
+    with _conn() as c:
+        row = c.execute("SELECT refresh_token FROM google_auth WHERE tid=?", (tid,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def get_google_auth(tid: int) -> sqlite3.Row | None:
+    _ensure_google_auth()
+    with _conn() as c:
+        return c.execute("SELECT * FROM google_auth WHERE tid=?", (tid,)).fetchone()
+
+
+def clear_google_auth(tid: int) -> None:
+    _ensure_google_auth()
+    with _conn() as c:
+        c.execute("DELETE FROM google_auth WHERE tid=?", (tid,))

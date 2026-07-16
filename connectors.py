@@ -683,7 +683,392 @@ class SlackConnector(Connector):
             return f"Error: unknown slack tool {tool_name}."
 
 
-CONNECTORS: list[Connector] = [EmailConnector(), CalendarConnector(), NotionConnector(), SlackConnector()]
+# ───────────────── google (Gmail + Calendar + Drive, OAuth 2.0) ─────────────────
+class GoogleConnector(Connector):
+    """Live Google via OAuth 2.0. Miles mints and stores his own refresh token
+    (see /connectgoogle): no secret ever passes through a human. Gmail is DRAFT
+    ONLY (Miles drafts, Kas sends). Calendar is read + write (writes only when Kas
+    has approved). Drive is read only (the audit). The refresh token lives in the
+    sqlite google_auth table on the Railway volume, so it survives redeploys."""
+
+    name = "google"
+    _TOKEN_URL = "https://oauth2.googleapis.com/token"
+    _AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+    _GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
+    _CAL = "https://www.googleapis.com/calendar/v3"
+    _DRIVE = "https://www.googleapis.com/drive/v3"
+    # Desktop OAuth client: Google has retired the OOB (urn:ietf:wg:oauth:2.0:oob)
+    # redirect for newly created clients, so we use the loopback redirect and have Kas
+    # copy the "code" param out of the localhost URL after she approves. No local
+    # server is needed: the browser just fails to load localhost and the code sits in
+    # the address bar.
+    REDIRECT_URI = "http://localhost"
+    SCOPES = [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+
+    def __init__(self) -> None:
+        self._cached_token: str | None = None
+        self._cached_expiry: float = 0.0
+
+    def needs(self) -> str:
+        return "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET, then /connectgoogle to authorize"
+
+    @staticmethod
+    def _owner_ids() -> list[int]:
+        try:
+            import config_loader as cfg
+            return [int(x) for x in (cfg.settings().get("access", {}).get("allowed_ids") or [])]
+        except Exception:  # noqa: BLE001
+            return []
+
+    @classmethod
+    def _stored_refresh_token(cls) -> str | None:
+        import database as db
+        for tid in cls._owner_ids():
+            rt = db.get_google_refresh_token(tid)
+            if rt:
+                return rt
+        return None
+
+    @staticmethod
+    def _has_app() -> bool:
+        return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
+
+    def configured(self) -> bool:
+        return bool(self._has_app() and self._stored_refresh_token())
+
+    # ---- OAuth: auth url + code exchange (used by /connectgoogle in handlers) ----
+    @classmethod
+    def auth_url(cls) -> str:
+        from urllib.parse import urlencode
+        params = {
+            "client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+            "redirect_uri": cls.REDIRECT_URI,
+            "response_type": "code",
+            "access_type": "offline",
+            "prompt": "consent",
+            "scope": " ".join(cls.SCOPES),
+        }
+        return f"{cls._AUTH_URL}?{urlencode(params)}"
+
+    @classmethod
+    def exchange_code(cls, tid: int, raw: str) -> tuple[bool, str]:
+        """Exchange an authorization code for a refresh token and store it. Accepts a
+        bare code OR a pasted http://localhost/?code=... URL. Never logs the code."""
+        from urllib.parse import urlparse, parse_qs, unquote
+        code = (raw or "").strip()
+        if "code=" in code:
+            try:
+                code = (parse_qs(urlparse(code).query).get("code") or [""])[0]
+            except Exception:  # noqa: BLE001
+                pass
+        code = unquote(code).strip()
+        if not code:
+            return False, "I didn't catch a code there. Paste just the code, or run /connectgoogle again."
+        import database as db
+        try:
+            with httpx.Client(timeout=30) as http:
+                r = http.post(cls._TOKEN_URL, data={
+                    "code": code,
+                    "client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+                    "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+                    "redirect_uri": cls.REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                })
+            data = r.json()
+            if r.status_code >= 400 or not data.get("refresh_token"):
+                err = data.get("error_description") or data.get("error") or "no refresh token returned"
+                return False, (f"That didn't take ({err}). The code may have expired or already "
+                               "been used. Run /connectgoogle and try once more.")
+            db.set_google_auth(tid, data["refresh_token"], " ".join(cls.SCOPES))
+            return True, "connected"
+        except Exception as e:  # noqa: BLE001
+            return False, f"Hit a snag exchanging the code. Run /connectgoogle and try again. ({str(e)[:120]})"
+
+    # ---- access token (refresh_token -> access_token, cached in memory) ----
+    def _access_token(self) -> str:
+        import time as _time
+        now = _time.time()
+        if self._cached_token and self._cached_expiry > now + 60:
+            return self._cached_token
+        rt = self._stored_refresh_token()
+        if not rt:
+            raise RuntimeError("Google is not connected. Run /connectgoogle.")
+        with httpx.Client(timeout=30) as http:
+            r = http.post(self._TOKEN_URL, data={
+                "client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+                "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+                "refresh_token": rt,
+                "grant_type": "refresh_token",
+            })
+        data = r.json()
+        if r.status_code >= 400 or not data.get("access_token"):
+            raise RuntimeError("Google auth expired or was revoked. Run /connectgoogle to reconnect.")
+        self._cached_token = data["access_token"]
+        self._cached_expiry = now + int(data.get("expires_in", 3600))
+        return self._cached_token
+
+    def _auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._access_token()}"}
+
+    # ---- gmail body helpers ----
+    @staticmethod
+    def _b64url_decode(data: str) -> str:
+        import base64
+        if not data:
+            return ""
+        pad = "=" * (-len(data) % 4)
+        try:
+            return base64.urlsafe_b64decode(data + pad).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @classmethod
+    def _find_part(cls, payload: dict, want: str) -> str | None:
+        if not payload:
+            return None
+        if payload.get("mimeType") == want and (payload.get("body") or {}).get("data"):
+            return payload["body"]["data"]
+        for part in payload.get("parts", []) or []:
+            found = cls._find_part(part, want)
+            if found:
+                return found
+        return None
+
+    @classmethod
+    def _message_body(cls, payload: dict) -> str:
+        data = cls._find_part(payload, "text/plain")
+        if data:
+            return cls._b64url_decode(data)
+        data = cls._find_part(payload, "text/html")
+        if data:
+            return re.sub(r"<[^>]+>", " ", cls._b64url_decode(data))
+        return ""
+
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "name": "gmail_recent",
+                "description": "List recent Gmail messages from Kas's inbox (read only). Returns id, from, subject, date, snippet. Use 'query' for Gmail search syntax (e.g. from:someone, newer_than:2d).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "How many, max 20. Default 10."},
+                        "unread_only": {"type": "boolean", "description": "Only unread. Default false."},
+                        "query": {"type": "string", "description": "Optional Gmail search query."},
+                    },
+                },
+            },
+            {
+                "name": "gmail_read",
+                "description": "Read one Gmail message in full (read only) by the id from gmail_recent. Returns from/to/subject/date/thread_id/body (plain text).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string", "description": "Message id from gmail_recent."}},
+                    "required": ["id"],
+                },
+            },
+            {
+                "name": "gmail_draft",
+                "description": "Create a DRAFT email in Kas's Gmail for her to review and send. This NEVER sends: it only saves a draft. Pass thread_id to draft a reply in an existing thread.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string", "description": "Recipient email address."},
+                        "subject": {"type": "string", "description": "Subject line."},
+                        "body": {"type": "string", "description": "Plain text body, in Kas's voice / UHNW register."},
+                        "thread_id": {"type": "string", "description": "Optional Gmail thread id to reply within."},
+                    },
+                    "required": ["to", "body"],
+                },
+            },
+            {
+                "name": "calendar_upcoming_v2",
+                "description": "List upcoming events from Kas's live Google Calendar (read). Times are Europe/Zurich. Returns summary/start/end/location/attendee count. This is the live API (complements the ICS calendar feeds).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer", "description": "Window ahead in days, max 60. Default 7."},
+                        "calendar_id": {"type": "string", "description": "Calendar id. Default 'primary'."},
+                    },
+                },
+            },
+            {
+                "name": "calendar_create_event",
+                "description": "Create an event on Kas's Google Calendar. Use ONLY when Kas has approved placing it. Always tell her exactly what you booked. Times are Europe/Zurich; pass RFC3339 datetimes like 2026-07-20T14:00:00.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string", "description": "Event title."},
+                        "start_iso": {"type": "string", "description": "Start, RFC3339 e.g. 2026-07-20T14:00:00."},
+                        "end_iso": {"type": "string", "description": "End, RFC3339 e.g. 2026-07-20T15:00:00."},
+                        "description": {"type": "string", "description": "Optional event notes."},
+                        "calendar_id": {"type": "string", "description": "Calendar id. Default 'primary'."},
+                    },
+                    "required": ["summary", "start_iso", "end_iso"],
+                },
+            },
+            {
+                "name": "drive_search",
+                "description": "Search Kas's Google Drive by file name (read only). Returns name/id/mimeType/modifiedTime/webViewLink. For the Drive audit.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Text to match in file names."}},
+                    "required": ["query"],
+                },
+            },
+        ]
+
+    def run(self, tool_name: str, args: dict) -> str:
+        from urllib.parse import quote
+        with httpx.Client(timeout=30) as http:
+            h = self._auth_headers()
+
+            if tool_name == "gmail_recent":
+                limit = min(int(args.get("limit", 10) or 10), 20)
+                params: dict = {"maxResults": limit}
+                q = str(args.get("query", "") or "").strip()
+                if args.get("unread_only"):
+                    q = (q + " is:unread").strip()
+                if q:
+                    params["q"] = q
+                r = http.get(f"{self._GMAIL}/messages", headers=h, params=params)
+                if r.status_code >= 400:
+                    return f"Error from Gmail: {r.text[:300]}"
+                out = []
+                for m in (r.json().get("messages") or []):
+                    mid = m["id"]
+                    mr = http.get(
+                        f"{self._GMAIL}/messages/{mid}", headers=h,
+                        params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
+                    )
+                    if mr.status_code >= 400:
+                        continue
+                    mj = mr.json()
+                    hdrs = {x["name"].lower(): x["value"] for x in (mj.get("payload", {}).get("headers") or [])}
+                    out.append({
+                        "id": mid,
+                        "from": hdrs.get("from", ""),
+                        "subject": hdrs.get("subject", ""),
+                        "date": hdrs.get("date", ""),
+                        "snippet": (mj.get("snippet") or "")[:200],
+                    })
+                return json.dumps(out, ensure_ascii=False)
+
+            if tool_name == "gmail_read":
+                mid = str(args.get("id", "")).strip()
+                if not mid:
+                    return "Error: need a message id from gmail_recent."
+                r = http.get(f"{self._GMAIL}/messages/{mid}", headers=h, params={"format": "full"})
+                if r.status_code >= 400:
+                    return f"Error from Gmail: {r.text[:300]}"
+                mj = r.json()
+                payload = mj.get("payload", {}) or {}
+                hdrs = {x["name"].lower(): x["value"] for x in (payload.get("headers") or [])}
+                return json.dumps({
+                    "id": mid,
+                    "thread_id": mj.get("threadId"),
+                    "from": hdrs.get("from", ""),
+                    "to": hdrs.get("to", ""),
+                    "subject": hdrs.get("subject", ""),
+                    "date": hdrs.get("date", ""),
+                    "body": self._message_body(payload)[:4000],
+                }, ensure_ascii=False)
+
+            if tool_name == "gmail_draft":
+                import base64
+                to = str(args.get("to", "")).strip()
+                subject = str(args.get("subject", "")).strip()
+                body = str(args.get("body", "")).strip()
+                thread_id = str(args.get("thread_id", "") or "").strip()
+                if not to or not body:
+                    return "Error: need at least 'to' and 'body' to draft."
+                lines = [f"To: {to}", "MIME-Version: 1.0", 'Content-Type: text/plain; charset="UTF-8"']
+                if subject:
+                    lines.insert(1, f"Subject: {subject}")
+                mime = ("\r\n".join(lines) + "\r\n\r\n" + body).encode("utf-8")
+                raw = base64.urlsafe_b64encode(mime).decode("ascii")
+                msg: dict = {"raw": raw}
+                if thread_id:
+                    msg["threadId"] = thread_id
+                r = http.post(f"{self._GMAIL}/drafts", headers=h, json={"message": msg})
+                if r.status_code >= 400:
+                    return f"Error creating draft: {r.text[:300]}"
+                did = r.json().get("id", "")
+                return (f"Draft saved to Kas's Gmail Drafts (draft id {did}). It is NOT sent. "
+                        "Tell Kas it's ready for her to review and send.")
+
+            if tool_name == "calendar_upcoming_v2":
+                days = min(int(args.get("days", 7) or 7), 60)
+                cal_id = quote(str(args.get("calendar_id", "primary") or "primary"), safe="@")
+                now = datetime.now(LOCAL_TZ)
+                r = http.get(f"{self._CAL}/calendars/{cal_id}/events", headers=h, params={
+                    "timeMin": now.isoformat(),
+                    "timeMax": (now + timedelta(days=days)).isoformat(),
+                    "singleEvents": "true",
+                    "orderBy": "startTime",
+                    "maxResults": 50,
+                })
+                if r.status_code >= 400:
+                    return f"Error from Calendar: {r.text[:300]}"
+                out = []
+                for ev in r.json().get("items", []):
+                    start = ev.get("start", {}) or {}
+                    end = ev.get("end", {}) or {}
+                    out.append({
+                        "id": ev.get("id"),
+                        "summary": ev.get("summary", "(no title)"),
+                        "start": start.get("dateTime") or start.get("date"),
+                        "end": end.get("dateTime") or end.get("date"),
+                        "location": ev.get("location", ""),
+                        "attendees": len(ev.get("attendees", []) or []),
+                    })
+                return json.dumps(out, ensure_ascii=False)[:8000]
+
+            if tool_name == "calendar_create_event":
+                cal_id = quote(str(args.get("calendar_id", "primary") or "primary"), safe="@")
+                summary = str(args.get("summary", "")).strip()
+                start_iso = str(args.get("start_iso", "")).strip()
+                end_iso = str(args.get("end_iso", "")).strip()
+                if not (summary and start_iso and end_iso):
+                    return "Error: need summary, start_iso and end_iso (RFC3339, e.g. 2026-07-20T14:00:00)."
+                body_payload: dict = {
+                    "summary": summary,
+                    "start": {"dateTime": start_iso, "timeZone": "Europe/Zurich"},
+                    "end": {"dateTime": end_iso, "timeZone": "Europe/Zurich"},
+                }
+                desc = str(args.get("description", "") or "").strip()
+                if desc:
+                    body_payload["description"] = desc
+                r = http.post(f"{self._CAL}/calendars/{cal_id}/events", headers=h, json=body_payload)
+                if r.status_code >= 400:
+                    return f"Error creating event: {r.text[:300]}"
+                ev = r.json()
+                return (f"Booked '{summary}', {start_iso} to {end_iso} (Europe/Zurich). "
+                        f"Event id {ev.get('id','')}. Tell Kas exactly what you placed on her calendar.")
+
+            if tool_name == "drive_search":
+                q = str(args.get("query", "")).strip()
+                if not q:
+                    return "Error: need a search query."
+                safe_q = q.replace("\\", "\\\\").replace("'", "\\'")
+                r = http.get(f"{self._DRIVE}/files", headers=h, params={
+                    "q": f"name contains '{safe_q}' and trashed = false",
+                    "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
+                    "pageSize": 20,
+                    "orderBy": "modifiedTime desc",
+                })
+                if r.status_code >= 400:
+                    return f"Error from Drive: {r.text[:300]}"
+                return json.dumps(r.json().get("files", []), ensure_ascii=False)[:6000]
+
+            return f"Error: unknown google tool {tool_name}."
+
+
+CONNECTORS: list[Connector] = [EmailConnector(), CalendarConnector(), NotionConnector(), SlackConnector(), GoogleConnector()]
 
 
 def active() -> list[Connector]:
@@ -710,6 +1095,14 @@ def dispatch(tool_name: str, args: dict) -> str:
 def status_lines() -> list[str]:
     lines = []
     for c in CONNECTORS:
+        if c.name == "google":
+            if c.configured():
+                lines.append("🟢 google: wired and live (Gmail draft-only, Calendar read+write, Drive read)")
+            elif GoogleConnector._has_app():
+                lines.append("🟡 google: app ready, run /connectgoogle to connect Kas's account")
+            else:
+                lines.append(f"⚪ google: not wired yet (needs {c.needs()})")
+            continue
         if c.configured():
             extra = ""
             if c.name == "email":

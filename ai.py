@@ -110,6 +110,15 @@ def build_system_prompt(tid: int) -> str:
             "changed. You can never send, delete, or publish anything: drafts stay "
             "drafts until the principal approves.\n"
         )
+        if any(c.name == "google" for c in acts):
+            tools_block += (
+                "Google is live (Gmail, Calendar, Drive). GMAIL IS DRAFT ONLY: you create "
+                "drafts in Kas's Drafts for her to review and send, and you never send. "
+                "Calendar is read and write, but only CREATE or change an event once Kas "
+                "has explicitly approved it, and always tell her exactly what you booked. "
+                "Drive is read only. Never reveal or repeat the contents of any Google "
+                "auth code or token.\n"
+            )
 
     brand = p.get("brand", "")
     sister = p.get("sister_company", "")
