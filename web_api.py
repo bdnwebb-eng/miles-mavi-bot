@@ -5,7 +5,8 @@ polling loop. No new pip dependencies, no entanglement with the PTB asyncio loop
 the connector layer uses synchronous httpx, which is perfectly happy in a thread.
 
 Single data route:
-    GET /api/dashboard?key=<DASHBOARD_API_KEY>
+    GET /api/status?key=<DASHBOARD_API_KEY>
+    (GET /api/dashboard is kept as a backward-compatible alias.)
 
 Everything is READ ONLY and CLIENT-SAFE. The payload carries aggregates plus
 project titles / stages only. It NEVER includes email bodies, message contents,
@@ -31,165 +32,284 @@ from urllib.parse import urlparse, parse_qs
 
 import httpx
 
-import(ÛÛ›™XÝÜœÂš[\Ü]X˜\ÙH\È‚‚›ÙÈHÙÙÚ[™Ë™Ù]ÙÙÙ\Šš\›Y\ËÙX—Ø\HŠB‚“ÓÔÔÐÒQSHHÂˆœÛXÚ×ØYÙ[™HŽˆ™Z[HÎØYÙ[™H‹ˆÚ]Ø\ÙYÙ\ÝŽˆ™Z[HŽH‹ŸB‚‚ˆÈ]H\ÜÙ[X›H
-XXÚÙXÝ[Ûˆ\ÛÛ]Y
-B™YˆÜš[˜Ú\[Ù[™\™ÞJ
-HOˆ\Ý‚ˆˆˆŒÌ^H[™\™ÞH\ÝÜžH›ÜˆHš[˜Ú\[ˆ]\˜]H[ÝÙYYË\ÙHHš\œÝˆ]\ÈØÛÜ™\ÈÙÙÙYˆ™]\›œÈÞÙ^KØÛÜ™_K‹‹—HÛ\Ýš\œÝˆˆˆ‚ˆžN‚ˆ[\ÜÛÛ™šY×ÛØY\ˆ\ÈÙ™ÂˆYÈHÚ[
-
-H›Üˆ[ˆ
-Ù™ËœÙ][™ÜÊ
-K™Ù]
-˜XØÙ\ÜÈ‹ßJK™Ù]
-˜[ÝÙYÚYÈŠHÜˆ×JWBˆ^Ù\^Ù\[ÛŽˆÈ›ÜXNˆ“LBˆYÈH×Bˆ›ÜˆY[ˆYÎ‚ˆ›ÝÜÈH‹™[™\™ÞWÚ\ÝÜžJYÌ
-BˆYˆ›ÝÜÎ‚ˆ™]\›ˆÞÈ™^HŽˆ–ÌKœØÛÜ™HŽˆ–ÌW_H›Üˆˆ[ˆ›ÝÜ×Bˆ™]\›ˆ×B‚‚™YˆÜ›Ú™XÝÊ
-HOˆ\Ý‚ˆˆˆ“]™H›Ú™XÝ›ÝÜÈœ›ÛH›Ý[Û‹›][™YšXHHÛÛ›™XÝÜ‰ÜÈÝÛˆÙÚXË‚‚ˆ]Y\šY\È“ÕSÓ—Ô“Ò‘PÕ×Ñ—ÒQ\™XÝH
-˜]\ˆ[ˆH[Ù[Y˜XÚ[™Âˆ›Ý[Û—Ü]Y\žWÙ]X˜\ÙHÛÛ
-HÛÈÙH[ÛÈØ\\™H\ÝÙY]YÝ[YH›ÜˆBˆÛÛÈ^\×ÜÝ[HØ[Ý[][Û‹ˆÛÜY“ÕÈÈ]™Hš\œÝ‚ˆˆˆ‚ˆšYHÜË™[š\›Û‹™Ù]
-““ÕSÓ—Ô“Ò‘PÕ×Ñ—ÒQŠBˆ\WÚÙ^HHÜË™[š\›Û‹™Ù]
-““ÕSÓ—ÐTWÒÑVHŠBˆYˆ›Ý
-šY[™\WÚÙ^JN‚ˆ™]\›ˆ×Bˆ˜ÈHÛÛ›™XÝÜœË“›Ý[ÛÛÛ›™XÝÜŠ
-Bˆ›ÝÈH]][YK››ÝÊÛÛ›™XÝÜœË[Y^›Û™K]ÊBˆÝ]H×BˆÚ]ÛY[
-[Y[Ý]LJH\È‚ˆˆHœÜÝ
-ˆˆžÛ˜Ë—ÐT_KÙ]X˜\Ù\ËÞÙšYKÜ]Y\žH‹ˆXY\œÏ[˜Ë—ÚXY\œÊ
-KˆœÛÛ^ÈœYÙWÜÚ^™HŽˆLKˆ
-Bˆ‹œ˜Z\ÙWÙ›Ü—ÜÝ]\Ê
-Bˆ›ÜˆÈ[ˆ‹šœÛÛŠ
-K™Ù]
-œ™\Ý[È‹×JN‚ˆ›ÜÈHË™Ù]
-œ›Ü\Y\È‹ßJHÜˆßBˆ›]HÛ˜[YNˆ˜Ë—Ü›ÜÝ˜[YJ›Ü
-H›Üˆ˜[YK›Ü[ˆ›ÜËš][\Ê
-_Bˆ^\×ÜÝ[HH›Û™BˆY]YHË™Ù]
-›\ÝÙY]YÝ[YH‹ˆŠBˆžN‚ˆÈH]][YK™œ›ÛZ\ÛÙ›Ü›X]
-Y]Yœ™\XÙJ–ˆ‹ŠÌŒŠJBˆ^\×ÜÝ[HH
-›ÝÈHÊK™^\Âˆ^Ù\
-˜[YQ\œ›Ü‹]šX]Q\œ›ÜŠN‚ˆ^\×ÜÝ[HH›Û™Bˆ]™HH›ÛÛ
-›]™Ù]
-“]™H›ÝÈŠJBˆÝ]˜\[™
-Âˆ˜ÛY[Žˆ›]™Ù]
-ÛY[˜[YHŠHÜˆ˜Ë—Ý]WÛÙŠÊKˆ˜ÛÙHŽˆ›]™Ù]
-”›Ú™XÝÛÙHŠHÜˆˆ‹ˆœÝYÙHŽˆ›]™Ù]
-”ÝYÙHŠHÜˆˆ‹ˆY\ˆŽˆ›]™Ù]
-“XYY\ˆŠHÜˆˆ‹ˆ\™Ù[˜ÞHŽˆ›]™Ù]
-•\™Ù[˜ÞHŠHÜˆˆ‹ˆ›ØØ][ÛˆŽˆ›]™Ù]
-”›Ü\HØØ][ÛˆŠHÜˆˆ‹ˆœ›Ü\WÝ\HŽˆ›]™Ù]
-”›Ü\H\HŠHÜˆˆ‹ˆ›™^ØXÝ[ÛˆŽˆ›]™Ù]
-“™^XÝ[ÛˆŠHÜˆˆ‹ˆ›]™HŽˆ]™Kˆ™^\×ÜÝ[HŽˆ^\×ÜÝ[Kˆ˜ÛÛŽˆ›ÛÛ
-^\×ÜÝ[H\È›Ý›Û™H[™^\×ÜÝ[HˆÊKˆJBˆY\—Ü˜[šÈHÈ““ÕÈŽˆ”ÓÓÓˆŽˆK“UTˆŽˆŸB‚ˆYˆÚÙ^J
-N‚ˆ™]\›ˆ
-ˆYˆÈ›]™H—H[ÙHKˆY\—Ü˜[šË™Ù]
+import connectors
+import database as db
 
-ÈY\ˆ—HÜˆˆŠK\\Š
-KÊKˆJÈ™^\×ÜÝ[H—HÜˆ
-Kˆ
-B‚ˆÝ]œÛÜ
-Ù^OWÚÙ^JBˆ™]\›ˆÝ]‚‚™YˆØØ[[™\Š
-HOˆ\Ý‚ˆˆˆ“™^È^\ÈÙˆ]™[ËˆÛÛÙÛH
-]™JH™Y™\œ™YPÔÈ™YYÈ\È˜[˜XÚË‚ˆ]\È[™[Y\ÈÛ›Kˆ™]\›œÈÞÜÝ[[X\žKÝ\[™ØØ][ÛŸK‹‹—Kˆˆˆ‚ˆØÈHÛÛ›™XÝÜœË‘ÛÛÙÛPÛÛ›™XÝÜŠ
-BˆYˆØË˜ÛÛ™šYÝ\™Y
+log = logging.getLogger("hermes.web_api")
 
-N‚ˆ˜]ÈHØËœ[Š˜Ø[[™\—Ý\ÛÛZ[™×ÝŒˆ‹È™^\ÈŽˆßJBˆ][\ÈHœÛÛ‹›ØYÊ˜]ÊHYˆ˜]ËœÝš\
+LOOP_SCHEDULE = {
+    "slack_agenda": "daily 07:40 #agenda",
+    "whatsapp_digest": "daily 06:45",
+}
 
-KœÝ\ÝÚ]
-–ÈŠH[ÙH×Bˆ™]\›ˆÂˆÈœÝ[[X\žHŽˆK™Ù]
-œÝ[[X\žH‹ˆŠKœÝ\ŽˆK™Ù]
-œÝ\‹ˆŠKˆ™[™ŽˆK™Ù]
-™[™‹ˆŠK›ØØ][ÛˆŽˆK™Ù]
-›ØØ][Ûˆ‹ˆŠ_Bˆ›ÜˆH[ˆ][\ÂˆBˆØÈHÛÛ›™XÝÜœËØ[[™\ÛÛ›™XÝÜŠ
-BˆYˆØË˜ÛÛ™šYÝ\™Y
 
-N‚ˆ˜]ÈHØËœ[Š˜Ø[[™\—Ý\ÛÛZ[™È‹È™^\ÈŽˆßJBˆ][\ÈHœÛÛ‹›ØYÊ˜]ÊHYˆ˜]ËœÝš\
+# data assembly (each section isolated)
+def _principal_energy() -> list:
+    """30 day energy history for the principal. Iterate allowed ids, use the first
+    that has scores logged. Returns [{day, score}, ...] oldest first."""
+    try:
+        import config_loader as cfg
+        ids = [int(x) for x in (cfg.settings().get("access", {}).get("allowed_ids") or [])]
+    except Exception:  # noqa: BLE001
+        ids = []
+    for tid in ids:
+        rows = db.energy_history(tid, 30)
+        if rows:
+            return [{"day": r[0], "score": r[1]} for r in rows]
+    return []
 
-KœÝ\ÝÚ]
-–ÈŠH[ÙH×Bˆ™]\›ˆÂˆÈœÝ[[X\žHŽˆK™Ù]
-œÝ[[X\žH‹ˆŠKœÝ\ŽˆK™Ù]
-œÝ\‹ˆŠKˆ™[™ŽˆK™Ù]
-™[™‹ˆŠK›ØØ][ÛˆŽˆK™Ù]
-›ØØ][Ûˆ‹ˆŠ_Bˆ›ÜˆH[ˆ][\ÈYˆ™\œ›Üˆˆ›Ý[ˆBˆBˆ™]\›ˆ×B‚‚™YˆÚ[˜›Þ
 
-N‚ˆˆˆ•[œ™XYÛÝ[Ó“Kˆ›ÈÝXš™XÝË›È›ÙY\Ëˆ›Û™HYˆÛÛÙÛH›ÝÛÛ›™XÝYˆˆˆ‚ˆØÈHÛÛ›™XÝÜœË‘ÛÛÙÛPÛÛ›™XÝÜŠ
-BˆYˆ›ÝØË˜ÛÛ™šYÝ\™Y
+def _projects() -> list:
+    """Live project rows from Notion, flattened via the connector's own logic.
 
-N‚ˆ™]\›ˆ›Û™BˆÚ]ÛY[
-[Y[Ý]LŒ
-H\È‚ˆˆH™Ù]
-ˆˆžÙØË—ÑÓPRSKÛY\ÜØYÙ\È‹ˆXY\œÏYØË—Ø]]ÚXY\œÊ
-Kˆ\˜[\Ï^ÈœHŽˆš\Î[œ™XY‹›X^™\Ý[ÈŽˆ_Kˆ
-BˆYˆ‹œÝ]\×ØÛÙHH‚ˆ˜Z\ÙH[[YQ\œ›ÜŠˆ™ÛXZ[Ü‹œÝ]\×ØÛÙ_HŠBˆ]HH‹šœÛÛŠ
-Bˆ™]\›ˆÈ[œ™XYØÛÝ[Žˆ[
-]K™Ù]
-œ™\Ý[Ú^™Q\Ý[X]H‹
-HÜˆ
-_B‚‚™YˆÜÙ[œÙ\Ê
-HOˆXÝ‚ˆˆˆÛÛ›™XÝÜˆOˆÝ]\ÈÝš[™Ëˆ	Û]™IÈÈ	Ü\X[	ÈÈ	Ü[™[™ÉËˆˆˆ‚ˆ\×ÙÛÛÙÛWÝÚÙ[ˆH›ÛÛ
-‹™Ù]ÙÛÛÙÛWÝÚÙ[Š
-JBˆXÜ×ØÛÛ™šYÝ\™YHÛÛ›™XÝÜœËØ[[™\ÛÛ›™XÝÜŠ
-K˜ÛÛ™šYÝ\™Y
+    Queries NOTION_PROJECTS_DB_ID directly (rather than the model-facing
+    notion_query_database tool) so we also capture last_edited_time for the
+    cold / days_stale calculation. Sorted NOW / live first.
+    """
+    dbid = os.environ.get("NOTION_PROJECTS_DB_ID")
+    api_key = os.environ.get("NOTION_API_KEY")
+    if not (dbid and api_key):
+        return []
+    nc = connectors.NotionConnector()
+    now = datetime.now(connectors.timezone.utc)
+    out = []
+    with httpx.Client(timeout=25) as http:
+        r = http.post(
+            f"{nc._API}/databases/{dbid}/query",
+            headers=nc._headers(),
+            json={"page_size": 100},
+        )
+        r.raise_for_status()
+        for pg in r.json().get("results", []):
+            props = pg.get("properties", {}) or {}
+            flat = {name: nc._prop_value(prop) for name, prop in props.items()}
+            days_stale = None
+            edited = pg.get("last_edited_time", "")
+            try:
+                ts = datetime.fromisoformat(edited.replace("Z", "+00:00"))
+                days_stale = (now - ts).days
+            except (ValueError, AttributeError):
+                days_stale = None
+            live = bool(flat.get("Live Now"))
+            out.append({
+                "client": flat.get("Client Name") or nc._title_of(pg),
+                "code": flat.get("Project Code") or "",
+                "stage": flat.get("Stage") or "",
+                "tier": flat.get("Lead Tier") or "",
+                "urgency": flat.get("Urgency") or "",
+                "location": flat.get("Property Location") or "",
+                "property_type": flat.get("Property Type") or "",
+                "next_action": flat.get("Next Action") or "",
+                "live": live,
+                "days_stale": days_stale,
+                "cold": bool(days_stale is not None and days_stale > 7),
+            })
+    tier_rank = {"NOW": 0, "SOON": 1, "LATER": 2}
 
-Bˆ[XZ[Ú[X\HÛÛ›™XÝÜœË‘[XZ[ÛÛ›™XÝÜŠ
-K˜ÛÛ™šYÝ\™Y
+    def _key(p):
+        return (
+            0 if p["live"] else 1,
+            tier_rank.get((p["tier"] or "").upper(), 3),
+            -(p["days_stale"] or 0),
+        )
 
-BˆYˆ\×ÙÛÛÙÛWÝÚÙ[Ž‚ˆØ[H›]™H‚ˆ[YˆXÜ×ØÛÛ™šYÝ\™Y‚ˆØ[Hœ\X[‚ˆ[ÙN‚ˆØ[Hœ[™[™È‚ˆ™]\›ˆÂˆ››Ý[ÛˆŽˆ›]™HˆYˆÛÛ›™XÝÜœË“›Ý[ÛÛÛ›™XÝÜŠ
-K˜ÛÛ™šYÝ\™Y
+    out.sort(key=_key)
+    return out
 
-H[ÙHœ[™[™È‹ˆœÛXÚÈŽˆ›]™HˆYˆÛÛ›™XÝÜœË”ÛXÚÐÛÛ›™XÝÜŠ
-K˜ÛÛ™šYÝ\™Y
 
-H[ÙHœ[™[™È‹ˆÚ]Ø\Žˆ›]™H‹ˆ˜Ø[[™\ˆŽˆØ[ˆ™[XZ[Žˆ›]™HˆYˆ
-\×ÙÛÛÙÛWÝÚÙ[ˆÜˆ[XZ[Ú[X\
-H[ÙHœ[™[™È‹ˆ™ÛÛÙÛHŽˆ›]™HˆYˆ\×ÙÛÛÙÛWÝÚÙ[ˆ[ÙHœ[™[™È‹ˆš[œÝYÜ˜[HŽˆœ[™[™È‹ˆB‚‚™YˆZ[Ü^[ØY
+def _calendar() -> list:
+    """Next 7 days of events. Google (live) preferred, ICS feeds as fallback.
+    Titles and times only. Returns [{summary, start, end, location}, ...]."""
+    gc = connectors.GoogleConnector()
+    if gc.configured():
+        raw = gc.run("calendar_upcoming_v2", {"days": 7})
+        items = json.loads(raw) if raw.strip().startswith("[") else []
+        return [
+            {"summary": e.get("summary", ""), "start": e.get("start", ""),
+             "end": e.get("end", ""), "location": e.get("location", "")}
+            for e in items
+        ]
+    cc = connectors.CalendarConnector()
+    if cc.configured():
+        raw = cc.run("calendar_upcoming", {"days": 7})
+        items = json.loads(raw) if raw.strip().startswith("[") else []
+        return [
+            {"summary": e.get("summary", ""), "start": e.get("start", ""),
+             "end": e.get("end", ""), "location": e.get("location", "")}
+            for e in items if "error" not in e
+        ]
+    return []
 
-HOˆXÝ‚ˆˆˆ\ÜÙ[X›HHÚÛH\Ú›Ø\™^[ØYˆ]™\žHÙXÝ[Ûˆ\È\ÛÛ]YÛÈÛ™Bˆ˜Z[[™ÈÛÝ\˜ÙHYÜ˜Y\ÈÈ[[œÝXYÙˆLZ[™ÈH[™Ú[ˆˆˆ‚ˆ›Ý×Þ\šXÚH]][YK››ÝÊÛÛ›™XÝÜœË“ÐÐSÕŠBˆ\œ›ÜœÈHßB‚ˆYˆÜØY™J˜[YK›‹Y˜][
-N‚ˆžN‚ˆ™]\›ˆ›Š
-Bˆ^Ù\^Ù\[Ûˆ\ÈNˆÈ›ÜXNˆ“LBˆ\œ›ÜœÖÛ˜[YWHHÝŠJVÎŒŒBˆÙËØ\›š[™Ê™\Ú›Ø\™ÙXÝ[Ûˆ	\È˜Z[Yˆ	\È‹˜[YKJBˆ™]\›ˆY˜][‚ˆ›Ú™XÝÈHÜØY™Jœ›Ú™XÝÈ‹Ü›Ú™XÝË×JBˆØ[[™\ˆHÜØY™J˜Ø[[™\ˆ‹ØØ[[™\‹×JBˆ[˜›ÞHÜØY™Jš[˜›Þ‹Ú[˜›Þ›Û™JBˆ[™\™ÞHHÜØY™J™[™\™ÞH‹Üš[˜Ú\[Ù[™\™ÞK×JBˆÙ[œÙ\ÈHÜØY™JœÙ[œÙ\È‹ÜÙ[œÙ\ËßJB‚ˆÙ[œÙ\×Û]™HHÝ[JH›Üˆˆ[ˆ
-Ù[œÙ\ÈÜˆßJK˜[Y\Ê
-HYˆˆOH›]™HŠBˆ›Ý×ÝY\ˆHÝ[JH›Üˆ[ˆ›Ú™XÝÈYˆ
-™Ù]
-Y\ˆŠHÜˆˆŠK\\Š
-HOH““ÕÈŠBˆ]™WÛ›ÝÈHÝ[JH›Üˆ[ˆ›Ú™XÝÈYˆ™Ù]
-›]™HŠJBˆÛÛØÛÝ[HÝ[JH›Üˆ[ˆ›Ú™XÝÈYˆ™Ù]
-˜ÛÛŠJB‚ˆÜ\ÈHÂˆœ›Ú™XÝ×ÝÝ[Žˆ[Š›Ú™XÝÊKˆ›]™WÛ›ÝÈŽˆ]™WÛ›ÝËˆ››Ý×ÝY\ˆŽˆ›Ý×ÝY\‹ˆ˜ÛÛØÛÝ[ŽˆÛÛØÛÝ[ˆœÙØ\Ý×Ø›ÛÚÙYŽˆKˆœÙ[œÙ\×Û]™HŽˆÙ[œÙ\×Û]™KˆB‚ˆ™]\›ˆÂˆ™Ù[™\˜]YØ]Žˆ›Ý×Þ\šXÚš\ÛÙ›Ü›X]
 
-KˆšÜ\ÈŽˆÜ\Ëˆœ›Ú™XÝÈŽˆ›Ú™XÝËˆ˜Ø[[™\ˆŽˆØ[[™\‹ˆš[˜›ÞŽˆ[˜›Þˆ™[™\™ÞHŽˆ[™\™ÞKˆœÙ[œÙ\ÈŽˆÙ[œÙ\Ëˆ›ÛÜÈŽˆXÝ
-ÓÔÔÐÒQSJKˆ™\œ›ÜœÈŽˆ\œ›ÜœËˆB‚‚˜Û\ÜÈÒ[™\Š˜\ÙR™\]Y\Ý[™\ŠN‚ˆ›ÝØÛÛÝ™\œÚ[ÛˆH’ÌKŒH‚‚ˆYˆØÛÜœÊÙ[ŠN‚ˆÙ[‹œÙ[™ÚXY\ŠXØÙ\ÜËPÛÛ›ÛP[ÝËSÜšYÚ[ˆ‹ŠˆŠBˆÙ[‹œÙ[™ÚXY\ŠXØÙ\ÜËPÛÛ›ÛP[ÝËSY]ÙÈ‹‘ÑUÔSÓ”ÈŠBˆÙ[‹œÙ[™ÚXY\ŠXØÙ\ÜËPÛÛ›ÛP[ÝËRXY\œÈ‹ŠˆŠB‚ˆYˆÜÙ[™
-Ù[‹ÛÙK›ÙKÝ\OH˜\XØ][Û‹ÚœÛÛˆŠN‚ˆÙ[‹œÙ[™Ü™\ÜÛœÙJÛÙJBˆÙ[‹œÙ[™ÚXY\ŠÛÛ[U\H‹Ý\JBˆÙ[‹œÙ[™ÚXY\ŠÛÛ[S[™Ý‹ÝŠ[Š›ÙJJJBˆÙ[‹—ØÛÜœÊ
-BˆÙ[‹™[™ÚXY\œÊ
-BˆžN‚ˆÙ[‹Ùš[KÜš]J›ÙJBˆ^Ù\^Ù\[ÛŽˆÈ›ÜXNˆ“LBˆ\ÜÂ‚ˆYˆ×ÓÔSÓ”ÊÙ[ŠNˆÈ›ÜXNˆŽ‚ˆÙ[‹œÙ[™Ü™\ÜÛœÙJŒ
-BˆÙ[‹—ØÛÜœÊ
-BˆÙ[‹œÙ[™ÚXY\ŠÛÛ[S[™Ý‹ŒŠBˆÙ[‹™[™ÚXY\œÊ
-B‚ˆYˆ×ÑÑU
-Ù[ŠNˆÈ›ÜXNˆŽ‚ˆ\œÙYH\›\œÙJÙ[‹œ]
-Bˆ›Ý]HH\œÙYœ]œœÝš\
-‹ÈŠHÜˆ‹È‚‚ˆYˆ›Ý]HOH‹ÚX[Ž‚ˆÙ[‹—ÜÙ[™
-Œˆ›ÚÈ‹^ÜZ[ˆŠBˆ™]\›‚‚ˆYˆ›Ý]HOH‹Ø\KÙ\Ú›Ø\™Ž‚ˆ^XÝYHÜË™[š\›Û‹™Ù]
-‘TÒ“ÐT‘ÐTWÒÑVHŠBˆYˆ›Ý^XÝY‚ˆÙ[‹—ÜÙ[™
-LËœÛÛ‹™[\ÊÈ™\œ›ÜˆŽˆ››ÝÛÛ™šYÝ\™YŸJK™[˜ÛÙJ
-K˜\XØ][Û‹ÚœÛÛˆŠBˆ™]\›‚ˆÙ^HH
-\œÙWÜ\Ê\œÙYœ]Y\žJK™Ù]
-šÙ^HŠHÜˆÈˆ—JVÌBˆYˆÙ^HOH^XÝY‚ˆÙ[‹—ÜÙ[™
-KœÛÛ‹™[\ÊÈ™\œ›ÜˆŽˆ[˜]]Üš^™YŸJK™[˜ÛÙJ
-K˜\XØ][Û‹ÚœÛÛˆŠBˆ™]\›‚ˆžN‚ˆ^[ØYHZ[Ü^[ØY
+def _inbox():
+    """Unread count ONLY. No subjects, no bodies. None if Google not connected.
+    Returns a plain integer (or None)."""
+    gc = connectors.GoogleConnector()
+    if not gc.configured():
+        return None
+    with httpx.Client(timeout=20) as http:
+        r = http.get(
+            f"{gc._GMAIL}/messages",
+            headers=gc._auth_headers(),
+            params={"q": "is:unread", "maxResults": 1},
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"gmail {r.status_code}")
+        data = r.json()
+        return int(data.get("resultSizeEstimate", 0) or 0)
 
-Bˆ›ÙHHœÛÛ‹™[\Ê^[ØY[œÝ\™WØ\ØÚZOQ˜[ÙJK™[˜ÛÙJ]‹NŠBˆ^Ù\^Ù\[Ûˆ\ÈNˆÈ›ÜXNˆ“LBˆÙË™^Ù\[ÛŠ™\Ú›Ø\™^[ØYZ[˜Z[YŠBˆÙ[‹—ÜÙ[™
-LœÛÛ‹™[\ÊÈ™\œ›ÜˆŽˆš[\›˜[‹™]Z[ŽˆÝŠJVÎŒŒ_JK™[˜ÛÙJ
-JBˆ™]\›‚ˆÙ[‹—ÜÙ[™
-Œ›ÙJBˆ™]\›‚‚ˆÙ[‹—ÜÙ[™
-œÛÛ‹™[\ÊÈ™\œ›ÜˆŽˆ››Ý›Ý[™ŸJK™[˜ÛÙJ
-JB‚ˆYˆÙ×ÛY\ÜØYÙJÙ[‹›]
-˜\™ÜÊN‚ˆÙË™XYÊÙX—Ø\H	\È‹›]	H\™ÜÊB‚‚™YˆÝ\
 
-HOˆ[‚ˆˆˆš[™HTHÙ\™\ˆ
-ÛˆHØ[[™È™XYÛÈš[™\œ›ÜœÈÝ\™˜XÙHÝYJBˆ[ˆÙ\™WÙ›Ü™]™\ˆ[ˆHY[[Ûˆ™XYˆ™]\›œÈHÜ]›Ý[™Ëˆˆˆ‚ˆÜH[
-ÜË™[š\›Û‹™Ù]
-”Ô•‹ŽŠHÜˆŽŠBˆÙ\™\ˆH™XY[™ÒÙ\™\Š
-ŒŒŒŒ‹Ü
-KÒ[™\ŠBˆÙ\™\‹™Y[[Û—Ý™XYÈHYBˆH™XY[™Ë•™XY
-\™Ù]\Ù\™\‹œÙ\™WÙ›Ü™]™\‹˜[YOHÙX—Ø\H‹Y[[ÛUYJBˆœÝ\
+def _senses() -> dict:
+    """Connector -> status string. 'live' / 'partial' / 'pending'."""
+    has_google_token = bool(db.get_google_token())
+    ics_configured = connectors.CalendarConnector().configured()
+    email_imap = connectors.EmailConnector().configured()
+    if has_google_token:
+        cal = "live"
+    elif ics_configured:
+        cal = "partial"
+    else:
+        cal = "pending"
+    return {
+        "notion": "live" if connectors.NotionConnector().configured() else "pending",
+        "slack": "live" if connectors.SlackConnector().configured() else "pending",
+        "whatsapp": "live",
+        "calendar": cal,
+        "email": "live" if (has_google_token or email_imap) else "pending",
+        "google": "live" if has_google_token else "pending",
+        "instagram": "pending",
+    }
 
-BˆÙËš[™›Ê‘\Ú›Ø\™THÛˆ‰\È‹Ü
-Bˆš[
-ˆ–ÝÙX—Ø\WH\Ú›Ø\™TH\Ý[š[™ÈÛˆŒŒŒžÜÜH‹›\ÚUYJBˆ™]\›ˆÜ‚‚šYˆ×Û˜[YW×ÈOH—×ÛXZ[—×ÈŽ‚ˆÙÙÚ[™Ë˜˜\ÚXÐÛÛ™šYÊ]™[[ÙÙÚ[™Ë’S‘“ÊBˆHÝ\
 
-Bˆ[\Ü[YBˆš[
-ˆœÙ\š[™ÈÛˆÜNÈÝ›XÈÈÝÜŠBˆÚ[HYN‚ˆ[YKœÛY\
-ÍŒ
-B
+def build_payload() -> dict:
+    """Assemble the whole dashboard payload. Every section is isolated so one
+    failing source degrades to null instead of 500-ing the endpoint."""
+    now_zurich = datetime.now(connectors.LOCAL_TZ)
+    errors = {}
+
+    def _safe(name, fn, default):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            errors[name] = str(e)[:200]
+            log.warning("dashboard section %s failed: %s", name, e)
+            return default
+
+    projects = _safe("projects", _projects, [])
+    calendar = _safe("calendar", _calendar, [])
+    inbox_unread = _safe("inbox_unread", _inbox, None)
+    energy_days = _safe("energy", _principal_energy, [])
+    senses = _safe("senses", _senses, {})
+
+    _scores = [d["score"] for d in (energy_days or [])
+               if isinstance(d.get("score"), (int, float))]
+    energy = {
+        "days": energy_days or [],
+        "average": round(sum(_scores) / len(_scores), 1) if _scores else None,
+    }
+
+    senses_live = sum(1 for v in (senses or {}).values() if v == "live")
+    now_tier = sum(1 for p in projects if (p.get("tier") or "").upper() == "NOW")
+    live_now = sum(1 for p in projects if p.get("live"))
+    cold_count = sum(1 for p in projects if p.get("cold"))
+
+    kpis = {
+        "projects_total": len(projects),
+        "live_now": live_now,
+        "now_tier": now_tier,
+        "cold_count": cold_count,
+        "podcasts_booked": 1,
+        "senses_live": senses_live,
+    }
+
+    return {
+        "generated_at": now_zurich.isoformat(),
+        "kpis": kpis,
+        "projects": projects,
+        "calendar": calendar,
+        "inbox_unread": inbox_unread,
+        "energy": energy,
+        "senses": senses,
+        "loops": dict(LOOP_SCHEDULE),
+        "errors": errors,
+    }
+
+
+class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+
+    def _send(self, code, body, ctype="application/json"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def do_OPTIONS(self):  # noqa: N802
+        self.send_response(204)
+        self._cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):  # noqa: N802
+        parsed = urlparse(self.path)
+        route = parsed.path.rstrip("/") or "/"
+
+        if route == "/health":
+            self._send(200, b"ok", "text/plain")
+            return
+
+        if route in ("/api/status", "/api/dashboard"):
+            expected = os.environ.get("DASHBOARD_API_KEY")
+            if not expected:
+                self._send(503, json.dumps({"error": "not configured"}).encode(), "application/json")
+                return
+            key = (parse_qs(parsed.query).get("key") or [""])[0]
+            if key != expected:
+                self._send(401, json.dumps({"error": "unauthorized"}).encode(), "application/json")
+                return
+            try:
+                payload = build_payload()
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            except Exception as e:  # noqa: BLE001
+                log.exception("dashboard payload build failed")
+                self._send(500, json.dumps({"error": "internal", "detail": str(e)[:200]}).encode())
+                return
+            self._send(200, body)
+            return
+
+        self._send(404, json.dumps({"error": "not found"}).encode())
+
+    def log_message(self, fmt, *args):
+        log.debug("web_api %s", fmt % args)
+
+
+def start() -> int:
+    """Bind the API server (on the calling thread, so bind errors surface loudly)
+    then serve_forever in a daemon thread. Returns the port it bound to."""
+    port = int(os.environ.get("PORT", "8080") or "8080")
+    server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
+    server.daemon_threads = True
+    t = threading.Thread(target=server.serve_forever, name="web_api", daemon=True)
+    t.start()
+    log.info("Dashboard API on :%s", port)
+    print(f"[web_api] Dashboard API listening on 0.0.0.0:{port}", flush=True)
+    return port
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    p = start()
+    import time
+    print(f"serving on {p}; ctrl-c to stop")
+    while True:
+        time.sleep(3600)
