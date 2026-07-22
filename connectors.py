@@ -736,12 +736,10 @@ class GoogleConnector(Connector):
 
     @classmethod
     def _stored_refresh_token(cls) -> str | None:
+        # Single-tenant: one shared Google identity for the whole bot. No per-user
+        # scan — every allowed user transparently shares the same token.
         import database as db
-        for tid in cls._owner_ids():
-            rt = db.get_google_refresh_token(tid)
-            if rt:
-                return rt
-        return None
+        return db.get_google_token()
 
     @staticmethod
     def _has_app() -> bool:
@@ -793,7 +791,9 @@ class GoogleConnector(Connector):
                 err = data.get("error_description") or data.get("error") or "no refresh token returned"
                 return False, (f"That didn't take ({err}). The code may have expired or already "
                                "been used. Run /connectgoogle and try once more.")
-            db.set_google_auth(tid, data["refresh_token"], " ".join(cls.SCOPES))
+            # Single shared Google identity: store under the sentinel row so every
+            # allowed user (Kas, Brandon) uses this same connection. tid is ignored.
+            db.set_google_token(data["refresh_token"], " ".join(cls.SCOPES))
             return True, "connected"
         except Exception as e:  # noqa: BLE001
             return False, f"Hit a snag exchanging the code. Run /connectgoogle and try again. ({str(e)[:120]})"
@@ -912,12 +912,12 @@ class GoogleConnector(Connector):
             },
             {
                 "name": "calendar_upcoming_v2",
-                "description": "List upcoming events from Kas's live Google Calendar (read). Times are Europe/Zurich. Returns summary/start/end/location/attendee count. This is the live API (complements the ICS calendar feeds).",
+                "description": "List upcoming events from Kas's live Google Calendar (read), merged across ALL of her calendars, not just primary. Times are Europe/Zurich. Returns summary/start/end/location/attendee count/calendar name. This is the live API (complements the ICS calendar feeds).",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "days": {"type": "integer", "description": "Window ahead in days, max 60. Default 7."},
-                        "calendar_id": {"type": "string", "description": "Calendar id. Default 'primary'."},
+                        "calendar_id": {"type": "string", "description": "Optional single calendar id to limit to. Default reads every calendar Kas can see."},
                     },
                 },
             },
@@ -1177,30 +1177,69 @@ class GoogleConnector(Connector):
 
             if tool_name == "calendar_upcoming_v2":
                 days = min(int(args.get("days", 7) or 7), 60)
-                cal_id = quote(str(args.get("calendar_id", "primary") or "primary"), safe="@")
                 now = datetime.now(LOCAL_TZ)
-                r = http.get(f"{self._CAL}/calendars/{cal_id}/events", headers=h, params={
-                    "timeMin": now.isoformat(),
-                    "timeMax": (now + timedelta(days=days)).isoformat(),
-                    "singleEvents": "true",
-                    "orderBy": "startTime",
-                    "maxResults": 50,
-                })
-                if r.status_code >= 400:
-                    return f"Error from Calendar: {r.text[:300]}"
-                out = []
-                for ev in r.json().get("items", []):
-                    start = ev.get("start", {}) or {}
-                    end = ev.get("end", {}) or {}
-                    out.append({
-                        "id": ev.get("id"),
-                        "summary": ev.get("summary", "(no title)"),
-                        "start": start.get("dateTime") or start.get("date"),
-                        "end": end.get("dateTime") or end.get("date"),
-                        "location": ev.get("location", ""),
-                        "attendees": len(ev.get("attendees", []) or []),
-                    })
-                return json.dumps(out, ensure_ascii=False)[:8000]
+                time_min = now.isoformat()
+                time_max = (now + timedelta(days=days)).isoformat()
+                # Kas's real schedule lives across many named calendars, not just
+                # primary. List every calendar the account can see, then read each.
+                cl = http.get(f"{self._CAL}/users/me/calendarList", headers=h,
+                              params={"maxResults": 250})
+                if cl.status_code >= 400:
+                    # The account can read events but not list every calendar
+                    # (narrow token scope). Fall back to the primary calendar so
+                    # the read never comes back empty. A re-consent with the full
+                    # calendar scope unlocks every calendar automatically.
+                    cals = [{"id": "primary", "summary": "primary"}]
+                else:
+                    cals = cl.json().get("items", []) or []
+                only = str(args.get("calendar_id", "") or "").strip()
+                if only and only != "primary":
+                    cals = [c for c in cals if c.get("id") == only]
+                merged = []
+                for cal in cals:
+                    cid = cal.get("id")
+                    if not cid:
+                        continue
+                    cal_name = cal.get("summaryOverride") or cal.get("summary") or cid
+                    try:
+                        er = http.get(
+                            f"{self._CAL}/calendars/{quote(cid, safe='@')}/events",
+                            headers=h, params={
+                                "timeMin": time_min,
+                                "timeMax": time_max,
+                                "singleEvents": "true",
+                                "orderBy": "startTime",
+                                "maxResults": 20,
+                            })
+                        if er.status_code >= 400:
+                            continue
+                        for ev in er.json().get("items", []):
+                            start = ev.get("start", {}) or {}
+                            end = ev.get("end", {}) or {}
+                            merged.append({
+                                "id": ev.get("id"),
+                                "summary": ev.get("summary", "(no title)"),
+                                "start": start.get("dateTime") or start.get("date"),
+                                "end": end.get("dateTime") or end.get("date"),
+                                "location": ev.get("location", ""),
+                                "attendees": len(ev.get("attendees", []) or []),
+                                "calendar": cal_name,
+                            })
+                    except Exception:  # noqa: BLE001
+                        # One bad calendar must not kill the whole read.
+                        continue
+                # Dedupe on summary + start, sort by start, cap the merged list.
+                seen = set()
+                deduped = []
+                for ev in merged:
+                    key = (ev.get("summary"), ev.get("start"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(ev)
+                deduped.sort(key=lambda e: (e.get("start") or ""))
+                deduped = deduped[:40]
+                return json.dumps(deduped, ensure_ascii=False)[:8000]
 
             if tool_name == "calendar_create_event":
                 cal_id = quote(str(args.get("calendar_id", "primary") or "primary"), safe="@")

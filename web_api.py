@@ -126,7 +126,8 @@ def _calendar() -> list:
         items = json.loads(raw) if raw.strip().startswith("[") else []
         return [
             {"summary": e.get("summary", ""), "start": e.get("start", ""),
-             "end": e.get("end", ""), "location": e.get("location", "")}
+             "end": e.get("end", ""), "location": e.get("location", ""),
+             "calendar": e.get("calendar", "")}
             for e in items
         ]
     cc = connectors.CalendarConnector()
@@ -154,7 +155,7 @@ def _inbox():
             params={"q": "is:unread", "maxResults": 1},
         )
         if r.status_code >= 400:
-            raise RuntimeError(f"gmail {r.status_code}")
+            raise RuntimeError(f"gmail {r.status_code}: {r.text[:300]}")
         data = r.json()
         return int(data.get("resultSizeEstimate", 0) or 0)
 
