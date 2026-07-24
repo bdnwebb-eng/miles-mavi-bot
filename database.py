@@ -299,6 +299,13 @@ def energy_history(tid: int, days: int = 30) -> list:
 
 
 # ───────────────────────── google oauth (refresh token on the Railway volume) ─────────────────────────
+# Miles serves exactly one principal (Kas), so Google is a single shared identity.
+# The shared refresh token lives in one sentinel row keyed tid=0; any allowed user
+# (Kas, Brandon the tester, anyone in allowed_ids) transparently uses the same token
+# with no per-user re-auth.
+SHARED_GOOGLE_TID = 0
+
+
 def _ensure_google_auth() -> None:
     with _conn() as c:
         c.execute(
@@ -307,22 +314,66 @@ def _ensure_google_auth() -> None:
         )
 
 
-def set_google_auth(tid: int, refresh_token: str, scopes: str) -> None:
-    """Store (or replace) the Google refresh token for a user. Survives redeploys."""
+def set_google_token(refresh_token: str, scopes: str) -> None:
+    """Store the single shared Google refresh token (upsert on the tid=0 sentinel row).
+    Any allowed user running /connectgoogle updates the connection for everyone.
+    Survives redeploys (Railway volume)."""
     _ensure_google_auth()
     with _conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO google_auth (tid, refresh_token, scopes, created) "
             "VALUES (?,?,?,?)",
-            (tid, refresh_token, scopes, datetime.utcnow().isoformat()),
+            (SHARED_GOOGLE_TID, refresh_token, scopes, datetime.utcnow().isoformat()),
         )
 
 
-def get_google_refresh_token(tid: int) -> str | None:
+def get_google_token() -> str | None:
+    """Return the single shared Google refresh token.
+
+    Prefer the sentinel row (tid=0). If no sentinel row exists yet, fall back to the
+    most recent legacy per-user row and adopt it as the shared token (copied into the
+    sentinel once) so an already-authorized connection is NEVER lost on migration.
+    """
     _ensure_google_auth()
     with _conn() as c:
-        row = c.execute("SELECT refresh_token FROM google_auth WHERE tid=?", (tid,)).fetchone()
-    return row[0] if row and row[0] else None
+        row = c.execute(
+            "SELECT refresh_token FROM google_auth WHERE tid=?", (SHARED_GOOGLE_TID,)
+        ).fetchone()
+        if row and row[0]:
+            return row[0]
+        # Backward-compat: adopt the most recent existing per-tid token as the shared one.
+        legacy = c.execute(
+            "SELECT refresh_token, scopes FROM google_auth "
+            "WHERE tid<>? AND refresh_token IS NOT NULL "
+            "ORDER BY rowid DESC LIMIT 1",
+            (SHARED_GOOGLE_TID,),
+        ).fetchone()
+        if legacy and legacy[0]:
+            c.execute(
+                "INSERT OR REPLACE INTO google_auth (tid, refresh_token, scopes, created) "
+                "VALUES (?,?,?,?)",
+                (SHARED_GOOGLE_TID, legacy[0], legacy[1], datetime.utcnow().isoformat()),
+            )
+            return legacy[0]
+    return None
+
+
+def clear_google_token() -> None:
+    """Drop the shared Google connection (all rows), forcing a fresh /connectgoogle."""
+    _ensure_google_auth()
+    with _conn() as c:
+        c.execute("DELETE FROM google_auth")
+
+
+# ---- legacy per-tid helpers (kept for backward compatibility) ----
+def set_google_auth(tid: int, refresh_token: str, scopes: str) -> None:
+    """Deprecated: writes the shared token regardless of tid (single-tenant bot)."""
+    set_google_token(refresh_token, scopes)
+
+
+def get_google_refresh_token(tid: int) -> str | None:
+    """Deprecated: returns the shared token regardless of tid (single-tenant bot)."""
+    return get_google_token()
 
 
 def get_google_auth(tid: int) -> sqlite3.Row | None:
@@ -335,3 +386,30 @@ def clear_google_auth(tid: int) -> None:
     _ensure_google_auth()
     with _conn() as c:
         c.execute("DELETE FROM google_auth WHERE tid=?", (tid,))
+
+
+# ───────────────────────── sentinel state (self-monitoring watchdog) ─────────────────────────
+# Small key/value store so the Sentinel watchdog remembers the last per-check status
+# and last-alert timestamps across restarts (no alert spam on redeploy).
+def _ensure_sentinel_state() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS sentinel_state (key TEXT PRIMARY KEY, "
+            "value TEXT, updated TEXT)"
+        )
+
+
+def set_sentinel_state(key: str, value: str) -> None:
+    _ensure_sentinel_state()
+    with _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO sentinel_state (key, value, updated) VALUES (?,?,?)",
+            (key, value, datetime.utcnow().isoformat()),
+        )
+
+
+def get_sentinel_state(key: str, default: str | None = None) -> str | None:
+    _ensure_sentinel_state()
+    with _conn() as c:
+        row = c.execute("SELECT value FROM sentinel_state WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default

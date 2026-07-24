@@ -14,6 +14,7 @@ import config_loader as cfg
 import database as db
 import handlers
 import notion_watch
+import sentinel
 import slack_rhythm
 import slack_socket
 import web_api
@@ -56,6 +57,17 @@ async def send_cold_flags(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("Cold flag to %s failed: %s", user["telegram_id"], e)
 
 
+async def sentinel_watchdog(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """JobQueue callback: run the Sentinel end-to-end health probe, alert Brandon
+    (the builder, never Kas) on any new or persisting RED and on recovery. Runs the
+    synchronous probe off the event loop so polling is never blocked."""
+    import asyncio as _aio
+    try:
+        await _aio.to_thread(sentinel.run_watchdog, "scheduled")
+    except Exception as e:  # noqa: BLE001
+        log.warning("[sentinel] watchdog run failed: %s", e)
+
+
 def main() -> None:
     load_dotenv()
     print("[bot] main() entered", flush=True)
@@ -77,6 +89,14 @@ def main() -> None:
 
     db.init_db()
 
+    # Sentinel boot self-test: end-to-end probe before polling. Logs one line
+    # per check and, if overall RED, fires a private alert to Brandon while the
+    # bot still starts (so /health and Telegram keep working). Never crashes boot.
+    try:
+        sentinel.boot_selftest()
+    except Exception as e:  # noqa: BLE001
+        log.warning("[sentinel] boot self-test failed to run: %s", e)
+
     app = Application.builder().token(token).build()
     handlers.register(app)
 
@@ -90,6 +110,9 @@ def main() -> None:
             # Both jobs self-gate on SLACK_BOT_TOKEN + SLACK_AGENDA_CHANNEL.
             app.job_queue.run_daily(slack_rhythm.morning_agenda, time=time(hour=7, minute=40, tzinfo=tz))
             app.job_queue.run_daily(slack_rhythm.eod_summary, time=time(hour=18, minute=30, tzinfo=tz))
+            # Sentinel watchdog: every 30 minutes, compare live health to last state
+            # and alert Brandon on new/persisting RED or recovery. First run at +2 min.
+            app.job_queue.run_repeating(sentinel_watchdog, interval=1800, first=120)
             log.info(
                 "Reminder scheduler active (cold scan 07:35, Slack agenda 07:40, EOD 18:30 %s). Slack rhythm %s.",
                 tz, "armed" if slack_rhythm.enabled() else "dormant (env not set)",

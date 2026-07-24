@@ -111,6 +111,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔌 /connectors — which live accounts I am wired into.\n"
         "🟢 /connectgoogle — connect your Google: Gmail, Calendar, and full Docs, Sheets, "
         "Slides & Drive create/edit (one time).\n"
+        "🩺 /sentinel — operator health check: is every system green (owner only).\n"
         "📋 /menu — show the button menu.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -261,7 +262,9 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Google OAuth code capture: after /connectgoogle, the next code-looking message
-    # is the authorization code Kas pasted back. Exchange it for a refresh token.
+    # is the authorization code the user pasted back. exchange_code stores it as the
+    # single SHARED Google token (single-tenant bot), so ANY allowed user connecting
+    # updates the one connection everyone uses. No per-user re-auth.
     if db.get_pref(tid, "awaiting_google_code", "0") == "1":
         t = text.strip()
         codelike = ("code=" in t) or t.startswith("4/") or (len(t) > 15 and " " not in t)
@@ -559,6 +562,37 @@ async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("Energy, last 14 logged days:\n" + "\n".join(lines) + f"\n\nAverage: {avg}/10. Log today: /energy 1-10.")
 
 
+# ───────────────────────── /sentinel (operator health, owner gated) ─────────────────────────
+async def sentinel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """On demand Sentinel health summary. Owner gated: only allowed operators can
+    ask Miles if it is healthy. Runs the read only probe off the event loop."""
+    tid = update.effective_user.id
+    if not _is_allowed(tid):
+        return
+    await update.message.reply_text("Running Sentinel diagnostics, one moment.")
+    import sentinel
+    try:
+        report = await asyncio.to_thread(sentinel.run_diagnostics, False)
+    except Exception as e:  # noqa: BLE001
+        await update.message.reply_text(f"Sentinel failed to run: {e}")
+        return
+    dot = {"green": "🟢", "amber": "🟡", "red": "🔴"}
+    counts = report.get("summary_counts", {})
+    head = (f"{dot.get(report['overall'], '⚪')} Miles Sentinel: "
+            f"{report['overall'].upper()}  "
+            f"({counts.get('green', 0)} green, {counts.get('amber', 0)} amber, "
+            f"{counts.get('red', 0)} red)")
+    lines = [head, ""]
+    for c in report["checks"]:
+        lines.append(f"{dot.get(c['status'], '⚪')} {c['label']}: {c['detail']}")
+        if c["status"] in ("red", "amber") and c.get("fix"):
+            lines.append(f"   Fix: {c['fix']}")
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3900] + "\n..."
+    await update.message.reply_text(text, disable_web_page_preview=True)
+
+
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
@@ -575,6 +609,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("connectors", connectors_cmd))
     app.add_handler(CommandHandler("connectgoogle", connectgoogle_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
+    app.add_handler(CommandHandler("sentinel", sentinel_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))

@@ -17,8 +17,9 @@ Auth: the key is validated against env DASHBOARD_API_KEY. On mismatch -> 401.
 If DASHBOARD_API_KEY is unset the server still starts (so /health works) but the
 data route returns 503 "not configured".
 
-Health route:
-    GET /health -> 200 "ok"
+Health routes:
+    GET /health -> 200 "ok"            (plain uptime ping)
+    GET /api/health?key=<DASHBOARD_API_KEY> -> full Sentinel diagnostics JSON
 """
 from __future__ import annotations
 
@@ -290,7 +291,38 @@ class _Handler(BaseHTTPRequestHandler):
         route = parsed.path.rstrip("/") or "/"
 
         if route == "/health":
-            self._send(200, b"ok", "text/plain")
+            # Tiny, key-free uptime ping. Returns the LAST known overall from the
+            # Sentinel watchdog state (never runs a live probe here, so it stays fast
+            # and cheap for uptime pingers). Full health is /api/health.
+            try:
+                import sentinel
+                overall = sentinel.cached_overall()
+            except Exception:  # noqa: BLE001
+                overall = "unknown"
+            self._send(200, json.dumps({"status": "ok", "overall": overall}).encode())
+            return
+
+        if route == "/api/health":
+            # Full Sentinel diagnostics as JSON, key-gated like /api/status. Lets the
+            # builder eyeball the true live health of every subsystem by curling one URL.
+            expected = os.environ.get("DASHBOARD_API_KEY")
+            if not expected:
+                self._send(503, json.dumps({"error": "not configured"}).encode(), "application/json")
+                return
+            qs = parse_qs(parsed.query)
+            key = (qs.get("key") or [""])[0]
+            if key != expected:
+                self._send(401, json.dumps({"error": "unauthorized"}).encode(), "application/json")
+                return
+            try:
+                import sentinel
+                report = sentinel.run_diagnostics(deep=True)
+                body = json.dumps(report, ensure_ascii=False).encode("utf-8")
+            except Exception as e:  # noqa: BLE001
+                log.exception("sentinel diagnostics failed")
+                self._send(500, json.dumps({"error": "internal", "detail": str(e)[:200]}).encode())
+                return
+            self._send(200, body)
             return
 
         if route in ("/api/status", "/api/dashboard"):
