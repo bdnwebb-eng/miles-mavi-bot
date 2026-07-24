@@ -117,29 +117,48 @@ def _projects() -> list:
     return out
 
 
-def _calendar() -> list:
-    """Next 7 days of events. Google (live) preferred, ICS feeds as fallback.
-    Titles and times only. Returns [{summary, start, end, location}, ...]."""
+def _calendar(days: int = 7) -> dict:
+    """Upcoming events. Google (live) preferred, ICS feeds as fallback.
+    Titles and times only. Returns {"events": [...], "meta": {window, complete, count}}."""
     gc = connectors.GoogleConnector()
     if gc.configured():
-        raw = gc.run("calendar_upcoming_v2", {"days": 7})
-        items = json.loads(raw) if raw.strip().startswith("[") else []
-        return [
+        raw = gc.run("calendar_upcoming_v2", {"days": days})
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {"events": [], "meta": {"window": None, "complete": False,
+                                           "error": raw[:200]}}
+        if isinstance(data, dict):
+            items = data.get("events", []) or []
+            meta = {"window": data.get("window"), "complete": data.get("complete"),
+                    "count": data.get("count")}
+            if data.get("ideal_week_daily"):
+                meta["ideal_week_daily"] = data["ideal_week_daily"]
+            if data.get("note"):
+                meta["note"] = data["note"]
+        else:
+            items = data if isinstance(data, list) else []
+            meta = {"window": None, "complete": True, "count": len(items)}
+        events = [
             {"summary": e.get("summary", ""), "start": e.get("start", ""),
              "end": e.get("end", ""), "location": e.get("location", ""),
              "calendar": e.get("calendar", "")}
             for e in items
         ]
+        return {"events": events, "meta": meta}
     cc = connectors.CalendarConnector()
     if cc.configured():
-        raw = cc.run("calendar_upcoming", {"days": 7})
+        raw = cc.run("calendar_upcoming", {"days": days})
         items = json.loads(raw) if raw.strip().startswith("[") else []
-        return [
+        events = [
             {"summary": e.get("summary", ""), "start": e.get("start", ""),
              "end": e.get("end", ""), "location": e.get("location", "")}
             for e in items if "error" not in e
         ]
-    return []
+        return {"events": events,
+                "meta": {"window": f"next {days} days (ICS fallback)",
+                         "complete": True, "count": len(events)}}
+    return {"events": [], "meta": {"window": None, "complete": True, "count": 0}}
 
 
 def _inbox():
@@ -182,7 +201,7 @@ def _senses() -> dict:
     }
 
 
-def build_payload() -> dict:
+def build_payload(days: int = 7) -> dict:
     """Assemble the whole dashboard payload. Every section is isolated so one
     failing source degrades to null instead of 500-ing the endpoint."""
     now_zurich = datetime.now(connectors.LOCAL_TZ)
@@ -197,7 +216,11 @@ def build_payload() -> dict:
             return default
 
     projects = _safe("projects", _projects, [])
-    calendar = _safe("calendar", _calendar, [])
+    cal = _safe("calendar", lambda: _calendar(days), {"events": [], "meta": {}})
+    if not isinstance(cal, dict):
+        cal = {"events": cal or [], "meta": {}}
+    calendar = cal.get("events", [])
+    calendar_meta = cal.get("meta", {})
     inbox_unread = _safe("inbox_unread", _inbox, None)
     energy_days = _safe("energy", _principal_energy, [])
     senses = _safe("senses", _senses, {})
@@ -228,6 +251,7 @@ def build_payload() -> dict:
         "kpis": kpis,
         "projects": projects,
         "calendar": calendar,
+        "calendar_meta": calendar_meta,
         "inbox_unread": inbox_unread,
         "energy": energy,
         "senses": senses,
@@ -274,12 +298,18 @@ class _Handler(BaseHTTPRequestHandler):
             if not expected:
                 self._send(503, json.dumps({"error": "not configured"}).encode(), "application/json")
                 return
-            key = (parse_qs(parsed.query).get("key") or [""])[0]
+            qs = parse_qs(parsed.query)
+            key = (qs.get("key") or [""])[0]
             if key != expected:
                 self._send(401, json.dumps({"error": "unauthorized"}).encode(), "application/json")
                 return
             try:
-                payload = build_payload()
+                days = int((qs.get("days") or ["7"])[0])
+            except (TypeError, ValueError):
+                days = 7
+            days = max(1, min(days, 60))
+            try:
+                payload = build_payload(days)
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             except Exception as e:  # noqa: BLE001
                 log.exception("dashboard payload build failed")

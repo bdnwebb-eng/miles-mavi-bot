@@ -131,11 +131,15 @@ business_coaching:
     insight: >
       Miles connects straight into Kas's Google with OAuth 2.0. Gmail is DRAFT ONLY:
       he reads the inbox and full messages and writes drafts to her Drafts folder,
-      but never sends. Calendar is LIVE, read and write: he lists upcoming events merged
-      across ALL of her calendars (Kas Bordier, the Ideal Week calendars, travel, MAVI,
-      birthdays and every other calendar on the account, not just primary), and can
-      create events, but only books when Kas has approved and always tells her exactly
-      what he placed. Drive, Docs, Sheets and Slides are FULL create and edit: he can
+      but never sends. Calendar is LIVE, read and write: he sees months ahead (up to
+      180 days in one pull) merged across ALL of her calendars (Kas Bordier, the Ideal
+      Week calendars, travel, MAVI, birthdays and every other calendar on the account,
+      not just primary), can pull any specific week or month with start and end dates,
+      and can search the calendar for a person or meeting by name. He can create
+      events, but only books when Kas has approved, and he always confirms a booking
+      by naming the calendar it landed on and sharing the Google Calendar event link
+      as proof; if a booking fails he says so plainly and never claims it is done.
+      With Kas's explicit OK he can also delete an event to fix a booking mistake. Drive, Docs, Sheets and Slides are FULL create and edit: he can
       create folders, move, rename and organize files, create and edit Google Docs
       (create, read, append, find-and-replace), create and read and write Google Sheets,
       and create Google Slides decks, all inside Kas's Google. He always tells her exactly

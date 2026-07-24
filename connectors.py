@@ -375,7 +375,7 @@ class NotionConnector(Connector):
                     "type": "object",
                     "properties": {
                         "database_id": {"type": "string", "description": "Database id (from notion_search or configuration)."},
-                        "page_size": {"type": "integer", "description": "Rows to return, max 50. Default 25."},
+                        "page_size": {"type": "integer", "description": "Rows to return, max 30. Default 25."},
                     },
                     "required": ["database_id"],
                 },
@@ -468,7 +468,7 @@ class NotionConnector(Connector):
                 return json.dumps(out, ensure_ascii=False)
             if tool_name == "notion_query_database":
                 dbid = args.get("database_id", "")
-                size = min(int(args.get("page_size", 25) or 25), 50)
+                size = min(int(args.get("page_size", 25) or 25), 30)
                 r = http.post(
                     f"{self._API}/databases/{dbid}/query",
                     headers=self._headers(),
@@ -481,7 +481,7 @@ class NotionConnector(Connector):
                     for pname, prop in (pg.get("properties") or {}).items():
                         props_out[pname] = self._prop_value(prop)
                     rows.append({"id": pg["id"], "properties": props_out})
-                return json.dumps(rows, ensure_ascii=False)[:8000]
+                return json.dumps(rows, ensure_ascii=False)
             if tool_name == "notion_update_property":
                 pid = args.get("page_id", "")
                 pname = args.get("property", "")
@@ -629,7 +629,7 @@ class SlackConnector(Connector):
                     {"id": ch["id"], "name": ch.get("name", ""), "is_member": bool(ch.get("is_member"))}
                     for ch in self._channels(http)
                 ]
-                return json.dumps(out, ensure_ascii=False)[:8000]
+                return json.dumps(out[:200], ensure_ascii=False)
 
             if tool_name == "slack_read_channel":
                 cid = self._resolve_channel(http, str(args.get("channel", "")))
@@ -661,7 +661,7 @@ class SlackConnector(Connector):
                             "text": text[:600],
                         }
                     )
-                return json.dumps(out, ensure_ascii=False)[:8000]
+                return json.dumps(out, ensure_ascii=False)
 
             if tool_name == "slack_post_message":
                 cid = self._resolve_channel(http, str(args.get("channel", "")))
@@ -912,18 +912,37 @@ class GoogleConnector(Connector):
             },
             {
                 "name": "calendar_upcoming_v2",
-                "description": "List upcoming events from Kas's live Google Calendar (read), merged across ALL of her calendars, not just primary. Times are Europe/Zurich. Returns summary/start/end/location/attendee count/calendar name. This is the live API (complements the ICS calendar feeds).",
+                "description": (
+                    "List events from Kas's live Google Calendar (read), merged across ALL of her "
+                    "calendars, not just primary. Times are Europe/Zurich. Default window is the next "
+                    "30 days; you may request up to 180 days so Kas can see months ahead. Use "
+                    "start_date and end_date for a specific week or month (they override days). Use q "
+                    "to find a person or meeting by name. The payload always states the exact window "
+                    "covered and a complete flag; if complete is false, tell Kas exactly what you "
+                    "could not see. Returns summary/start/end/location/attendee count/calendar name."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "days": {"type": "integer", "description": "Window ahead in days, max 60. Default 7."},
+                        "days": {"type": "integer", "description": "Window ahead in days, up to 180. Default 30."},
+                        "start_date": {"type": "string", "description": "Optional window start, YYYY-MM-DD, Europe/Zurich. Overrides days."},
+                        "end_date": {"type": "string", "description": "Optional window end, YYYY-MM-DD inclusive, Europe/Zurich. Overrides days."},
+                        "q": {"type": "string", "description": "Optional free text search, e.g. a person or meeting name. Passed to Google's event search."},
                         "calendar_id": {"type": "string", "description": "Optional single calendar id to limit to. Default reads every calendar Kas can see."},
                     },
                 },
             },
             {
                 "name": "calendar_create_event",
-                "description": "Create an event on Kas's Google Calendar. Use ONLY when Kas has approved placing it. Always tell her exactly what you booked. Times are Europe/Zurich; pass RFC3339 datetimes like 2026-07-20T14:00:00.",
+                "description": (
+                    "Create an event on Kas's Google Calendar. Use ONLY when Kas has approved placing it. "
+                    "The tool verifies the write by reading the event straight back from Google and only "
+                    "then reports success, returning the event id, the htmlLink and the calendar it "
+                    "landed on (default primary, Kas's main kas@maviliving calendar). ALWAYS give Kas "
+                    "the htmlLink as proof and name the calendar it went on. If this tool returns an "
+                    "error the event was NOT created: never tell Kas it is booked. Times are "
+                    "Europe/Zurich; pass RFC3339 datetimes like 2026-07-20T14:00:00."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -934,6 +953,23 @@ class GoogleConnector(Connector):
                         "calendar_id": {"type": "string", "description": "Calendar id. Default 'primary'."},
                     },
                     "required": ["summary", "start_iso", "end_iso"],
+                },
+            },
+            {
+                "name": "calendar_delete_event",
+                "description": (
+                    "Delete ONE event from Kas's Google Calendar by event id. CONFIRM FIRST: only "
+                    "delete when Kas has explicitly approved removing that exact event, and always "
+                    "tell her exactly what you removed and from which calendar. Use this to clean up "
+                    "your own booking mistakes once Kas confirms."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "string", "description": "The event id from calendar_upcoming_v2 or calendar_create_event."},
+                        "calendar_id": {"type": "string", "description": "Calendar id the event lives on. Default 'primary'."},
+                    },
+                    "required": ["event_id"],
                 },
             },
             {
@@ -1176,19 +1212,40 @@ class GoogleConnector(Connector):
                         "Tell Kas it's ready for her to review and send.")
 
             if tool_name == "calendar_upcoming_v2":
-                days = min(int(args.get("days", 7) or 7), 60)
+                # Window: explicit start_date / end_date (Europe/Zurich) override days.
                 now = datetime.now(LOCAL_TZ)
-                time_min = now.isoformat()
-                time_max = (now + timedelta(days=days)).isoformat()
+                sd = str(args.get("start_date", "") or "").strip()
+                ed = str(args.get("end_date", "") or "").strip()
+                try:
+                    days = int(args.get("days", 30) or 30)
+                except (TypeError, ValueError):
+                    days = 30
+                days = max(1, min(days, 180))
+                start_dt = now
+                if sd:
+                    try:
+                        start_dt = datetime.strptime(sd, "%Y-%m-%d").replace(tzinfo=LOCAL_TZ)
+                    except ValueError:
+                        return "Error: start_date must be YYYY-MM-DD."
+                if ed:
+                    try:
+                        end_dt = datetime.strptime(ed, "%Y-%m-%d").replace(tzinfo=LOCAL_TZ) + timedelta(days=1)
+                    except ValueError:
+                        return "Error: end_date must be YYYY-MM-DD."
+                else:
+                    end_dt = start_dt + timedelta(days=days)
+                if end_dt <= start_dt:
+                    return "Error: the window is empty (end_date is before start_date)."
+                time_min = start_dt.isoformat()
+                time_max = end_dt.isoformat()
+                search_q = str(args.get("q", "") or "").strip()
                 # Kas's real schedule lives across many named calendars, not just
                 # primary. List every calendar the account can see, then read each.
                 cl = http.get(f"{self._CAL}/users/me/calendarList", headers=h,
                               params={"maxResults": 250})
                 if cl.status_code >= 400:
-                    # The account can read events but not list every calendar
-                    # (narrow token scope). Fall back to the primary calendar so
-                    # the read never comes back empty. A re-consent with the full
-                    # calendar scope unlocks every calendar automatically.
+                    # Narrow token scope: fall back to primary so the read never
+                    # comes back empty. Re-consent unlocks every calendar.
                     cals = [{"id": "primary", "summary": "primary"}]
                 else:
                     cals = cl.json().get("items", []) or []
@@ -1196,39 +1253,60 @@ class GoogleConnector(Connector):
                 if only and only != "primary":
                     cals = [c for c in cals if c.get("id") == only]
                 merged = []
+                truncated_cals: list[str] = []
+                failed_cals: list[str] = []
                 for cal in cals:
                     cid = cal.get("id")
                     if not cid:
                         continue
                     cal_name = cal.get("summaryOverride") or cal.get("summary") or cid
                     try:
-                        er = http.get(
-                            f"{self._CAL}/calendars/{quote(cid, safe='@')}/events",
-                            headers=h, params={
+                        page_token = ""
+                        pages = 0
+                        while pages < 2:  # up to 2 pages (500 events) per calendar
+                            params = {
                                 "timeMin": time_min,
                                 "timeMax": time_max,
                                 "singleEvents": "true",
                                 "orderBy": "startTime",
-                                "maxResults": 20,
-                            })
-                        if er.status_code >= 400:
-                            continue
-                        for ev in er.json().get("items", []):
-                            start = ev.get("start", {}) or {}
-                            end = ev.get("end", {}) or {}
-                            merged.append({
-                                "id": ev.get("id"),
-                                "summary": ev.get("summary", "(no title)"),
-                                "start": start.get("dateTime") or start.get("date"),
-                                "end": end.get("dateTime") or end.get("date"),
-                                "location": ev.get("location", ""),
-                                "attendees": len(ev.get("attendees", []) or []),
-                                "calendar": cal_name,
-                            })
+                                "maxResults": 250,
+                            }
+                            if search_q:
+                                params["q"] = search_q
+                            if page_token:
+                                params["pageToken"] = page_token
+                            er = http.get(
+                                f"{self._CAL}/calendars/{quote(cid, safe='@')}/events",
+                                headers=h, params=params)
+                            if er.status_code >= 400:
+                                failed_cals.append(cal_name)
+                                page_token = ""
+                                break
+                            ej = er.json()
+                            for ev in ej.get("items", []):
+                                start = ev.get("start", {}) or {}
+                                end = ev.get("end", {}) or {}
+                                merged.append({
+                                    "id": ev.get("id"),
+                                    "summary": ev.get("summary", "(no title)"),
+                                    "start": start.get("dateTime") or start.get("date"),
+                                    "end": end.get("dateTime") or end.get("date"),
+                                    "location": ev.get("location", ""),
+                                    "attendees": len(ev.get("attendees", []) or []),
+                                    "calendar": cal_name,
+                                })
+                            page_token = ej.get("nextPageToken", "") or ""
+                            pages += 1
+                            if not page_token:
+                                break
+                        if page_token:
+                            truncated_cals.append(cal_name)
                     except Exception:  # noqa: BLE001
                         # One bad calendar must not kill the whole read.
+                        failed_cals.append(cal_name)
                         continue
-                # Dedupe on summary + start, sort by start, cap the merged list.
+                # Dedupe on summary + start (the same event often appears on
+                # several calendars), then sort chronologically.
                 seen = set()
                 deduped = []
                 for ev in merged:
@@ -1238,11 +1316,73 @@ class GoogleConnector(Connector):
                     seen.add(key)
                     deduped.append(ev)
                 deduped.sort(key=lambda e: (e.get("start") or ""))
-                deduped = deduped[:40]
-                return json.dumps(deduped, ensure_ascii=False)[:8000]
+                window = {
+                    "start": start_dt.strftime("%Y-%m-%d"),
+                    "end": (end_dt - timedelta(seconds=1)).strftime("%Y-%m-%d"),
+                    "timezone": "Europe/Zurich",
+                }
+                payload: dict = {"window": window,
+                                 "complete": not (truncated_cals or failed_cals)}
+                notes = []
+                if truncated_cals:
+                    notes.append(
+                        "Pagination stopped after 2 pages on: "
+                        + ", ".join(sorted(set(truncated_cals)))
+                        + ". Later events on those calendars are missing from this pull.")
+                if failed_cals:
+                    notes.append(
+                        "Could not read: " + ", ".join(sorted(set(failed_cals)))
+                        + ". Their events are missing from this pull.")
+                if notes:
+                    notes.append("Tell Kas plainly which part of the window you could not see.")
+                    payload["note"] = " ".join(notes)
+                if search_q:
+                    payload["search"] = search_q
+
+                # Never let routine blocks crowd out real appointments: when the
+                # merged list is large, keep every non rhythm event in full and
+                # compress the recurring Ideal Week blocks into one line per day.
+                def _is_rhythm(e: dict) -> bool:
+                    return "ideal week" in str(e.get("calendar", "")).lower()
+
+                if len(deduped) > 120:
+                    real = [e for e in deduped if not _is_rhythm(e)]
+                    rhythm = [e for e in deduped if _is_rhythm(e)]
+                    per_day: dict = {}
+                    for e in rhythm:
+                        day = str(e.get("start") or "")[:10]
+                        d = per_day.setdefault(day, {"blocks": 0, "first": "", "last": ""})
+                        d["blocks"] += 1
+                        st = str(e.get("start") or "")
+                        en = str(e.get("end") or "")
+                        t0 = st[11:16] if len(st) >= 16 else "00:00"
+                        t1 = en[11:16] if len(en) >= 16 else t0
+                        if not d["first"] or t0 < d["first"]:
+                            d["first"] = t0
+                        if not d["last"] or t1 > d["last"]:
+                            d["last"] = t1
+                    payload["events"] = real
+                    payload["ideal_week_daily"] = [
+                        {"day": day,
+                         "summary": (f"Ideal Week rhythm blocks: {v['first']} to "
+                                     f"{v['last']} ({v['blocks']} blocks)")}
+                        for day, v in sorted(per_day.items())
+                    ]
+                    payload["count"] = {"appointments": len(real),
+                                        "ideal_week_blocks": len(rhythm)}
+                    payload["digest"] = (
+                        "Recurring Ideal Week rhythm blocks are compressed to one line per "
+                        "day; every other event in the window is listed in full.")
+                else:
+                    payload["events"] = deduped
+                    payload["count"] = len(deduped)
+                # Full JSON, never string sliced: a byte cap truncates valid JSON
+                # mid event and breaks the consumer's parse.
+                return json.dumps(payload, ensure_ascii=False)
 
             if tool_name == "calendar_create_event":
-                cal_id = quote(str(args.get("calendar_id", "primary") or "primary"), safe="@")
+                raw_cal = str(args.get("calendar_id", "primary") or "primary").strip() or "primary"
+                cal_id = quote(raw_cal, safe="@")
                 summary = str(args.get("summary", "")).strip()
                 start_iso = str(args.get("start_iso", "")).strip()
                 end_iso = str(args.get("end_iso", "")).strip()
@@ -1258,10 +1398,56 @@ class GoogleConnector(Connector):
                     body_payload["description"] = desc
                 r = http.post(f"{self._CAL}/calendars/{cal_id}/events", headers=h, json=body_payload)
                 if r.status_code >= 400:
-                    return f"Error creating event: {r.text[:300]}"
+                    return f"Error: the event was NOT created. Google said: {r.text[:300]}"
                 ev = r.json()
-                return (f"Booked '{summary}', {start_iso} to {end_iso} (Europe/Zurich). "
-                        f"Event id {ev.get('id','')}. Tell Kas exactly what you placed on her calendar.")
+                event_id = str(ev.get("id", "") or "")
+                if not event_id:
+                    return ("Error: the event was NOT created (Google returned no event id). "
+                            "Do not tell Kas it is booked.")
+                # Verified write: read the event straight back before claiming success.
+                vr = http.get(f"{self._CAL}/calendars/{cal_id}/events/{quote(event_id, safe='')}",
+                              headers=h)
+                if vr.status_code >= 400:
+                    return (f"Error: Google returned event id {event_id} but the verification "
+                            f"readback failed ({vr.status_code}: {vr.text[:200]}). Treat this as "
+                            "NOT booked and tell Kas plainly.")
+                vj = vr.json()
+                cal_label = raw_cal
+                cm = http.get(f"{self._CAL}/calendars/{cal_id}", headers=h)
+                if cm.status_code < 400:
+                    cal_label = str(cm.json().get("summary") or raw_cal)
+                if raw_cal == "primary" and cal_label != "primary":
+                    cal_label = f"primary ({cal_label})"
+                vstart = vj.get("start") or {}
+                vend = vj.get("end") or {}
+                return json.dumps({
+                    "verified": True,
+                    "id": event_id,
+                    "htmlLink": vj.get("htmlLink", ""),
+                    "calendar": cal_label,
+                    "summary": vj.get("summary", summary),
+                    "start": vstart.get("dateTime") or vstart.get("date"),
+                    "end": vend.get("dateTime") or vend.get("date"),
+                    "note": ("Verified by readback from Google. Tell Kas exactly what you "
+                             "booked, name the calendar it landed on, and give her the "
+                             "htmlLink as proof."),
+                }, ensure_ascii=False)
+
+            if tool_name == "calendar_delete_event":
+                event_id = str(args.get("event_id", "")).strip()
+                if not event_id:
+                    return "Error: need event_id."
+                raw_cal = str(args.get("calendar_id", "primary") or "primary").strip() or "primary"
+                cal_id = quote(raw_cal, safe="@")
+                r = http.delete(f"{self._CAL}/calendars/{cal_id}/events/{quote(event_id, safe='')}",
+                                headers=h)
+                if r.status_code in (200, 204):
+                    return (f"Deleted event {event_id} from calendar '{raw_cal}'. "
+                            "Tell Kas exactly what you removed.")
+                if r.status_code in (404, 410):
+                    return (f"Error: no event {event_id} on calendar '{raw_cal}'. "
+                            "It may already be gone or live on a different calendar.")
+                return f"Error: delete failed ({r.status_code}): {r.text[:300]}"
 
             if tool_name == "drive_search":
                 q = str(args.get("query", "")).strip()
@@ -1276,7 +1462,7 @@ class GoogleConnector(Connector):
                 })
                 if r.status_code >= 400:
                     return f"Error from Drive: {r.text[:300]}"
-                return json.dumps(r.json().get("files", []), ensure_ascii=False)[:6000]
+                return json.dumps(r.json().get("files", []), ensure_ascii=False)
 
             if tool_name == "drive_create_folder":
                 name = str(args.get("name", "")).strip()
@@ -1426,7 +1612,12 @@ class GoogleConnector(Connector):
                 r = http.get(f"{self._SHEETS}/{sid}/values/{quote(rng, safe='!:')}", headers=h)
                 if r.status_code >= 400:
                     return f"Error reading sheet: {r.text[:300]}"
-                return json.dumps(r.json().get("values", []), ensure_ascii=False)[:6000]
+                values = r.json().get("values", []) or []
+                if len(values) > 100:
+                    return json.dumps({"rows": values[:100],
+                                       "note": f"Showing the first 100 of {len(values)} rows."},
+                                      ensure_ascii=False)
+                return json.dumps(values, ensure_ascii=False)
 
             if tool_name in ("sheets_write", "sheets_append"):
                 sid = str(args.get("spreadsheet_id", "")).strip()
@@ -1499,7 +1690,7 @@ def dispatch(tool_name: str, args: dict) -> str:
     return f"Error: tool {tool_name} is not wired."
 
 
-# v5: Google broadened to full Drive/Docs/Sheets/Slides create+edit (2026-07-16)
+# v6.2: calendar depth + search, verified writes with proof links, truncation audit (2026-07-24)
 def status_lines() -> list[str]:
     lines = []
     for c in CONNECTORS:

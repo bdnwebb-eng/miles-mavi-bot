@@ -23,7 +23,7 @@ _client: Anthropic | None = None
 MEMORY_LIMIT = 48                    # memories injected into the prompt
 EXTRACT_EVERY = 8                    # user messages between extraction passes
 EXTRACT_MODEL = "claude-haiku-4-5-20251001"
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 8
 
 IMAGE_DEFAULT_INSTRUCTION = (
     "Kas sent this image. If it is a chat screenshot (WhatsApp, email, etc), identify "
@@ -107,8 +107,10 @@ def build_system_prompt(tid: int) -> str:
             "what you find in your own voice; never dump raw output. Email is read only. "
             "In Notion you may update ONE property at a time on a project page (health, "
             "next action, dates) and you must tell the principal exactly what you "
-            "changed. You can never send, delete, or publish anything: drafts stay "
-            "drafts until the principal approves.\n"
+            "changed. You can never send or publish anything: drafts stay drafts until the "
+            "principal approves. When a tool returns an error or an incomplete window, "
+            "tell Kas plainly what you could and could not see, and what you are doing "
+            "about it. Never present partial data as complete.\n"
         )
         if any(c.name == "google" for c in acts):
             tools_block += (
@@ -121,7 +123,8 @@ def build_system_prompt(tid: int) -> str:
                 "review and send, and you never send. DRIVE DELETES ARE TRASH ONLY: you move "
                 "items to Trash (recoverable), never permanently delete, and you say so. Calendar "
                 "writes still CONFIRM FIRST: only create or change an event once Kas has explicitly "
-                "approved it, and always tell her exactly what you booked. Never reveal or repeat "
+                "approved it, and always tell her exactly what you booked, naming the calendar it "
+                "landed on and sharing the event htmlLink the tool returns as proof. Never reveal or repeat "
                 "the contents of any Google auth code or token.\n"
             )
 
@@ -228,8 +231,13 @@ def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
         resp = client.messages.create(messages=messages, **kwargs)
         rounds += 1
 
-    reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-    reply = reply.strip() or "On it — give me one more line of detail and I'll sort it."
+    if getattr(resp, "stop_reason", "") == "tool_use":
+        # Ran out of tool rounds with actions still pending: never imply success.
+        reply = ("I hit my tool step limit before finishing that, so the last action was "
+                 "NOT completed. Tell me to continue and I will pick it up from there.")
+    else:
+        reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        reply = reply.strip() or "On it. Give me one more line of detail and I'll sort it."
     db.add_message(tid, "assistant", reply)
     return reply
 
