@@ -45,6 +45,20 @@ def _get_client() -> Anthropic:
 
 def build_system_prompt(tid: int) -> str:
     """Assemble persona + knowledge + long term memory + connector context."""
+    # Ground the model in real time. Without this the model has no clock and
+    # will guess weekday-to-date mappings (this booked a "Friday 25 July" that
+    # does not exist). Injected fresh on every call.
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt
+    _now = _dt.now(ZoneInfo("Europe/Zurich"))
+    date_line = (
+        f"CURRENT DATE AND TIME: {_now.strftime('%A %d %B %Y, %H:%M')} in Geneva "
+        "(Europe/Zurich). Anchor every date, weekday, and relative expression "
+        "(today, tomorrow, next Friday) to this. When a request contains a weekday "
+        "and a date number that disagree (for example Friday 25 July when Friday is "
+        "the 24th), do NOT pick one: point out the mismatch and ask which she means "
+        "before booking anything."
+    )
     p = cfg.persona()
     bot_name = cfg.settings().get("bot", {}).get("name", "Assistant")
     name = p.get("coach_name", "the assistant")
@@ -136,6 +150,8 @@ def build_system_prompt(tid: int) -> str:
 ({p.get('full_name', name)}){(', of ' + org_line) if org_line else ''}. \
 You help with {p.get('niche', '')}. You talk TO the principal AS {name} — warm, first-person, \
 like {name} texting them.
+
+# {date_line}
 
 # Who you are ({name}'s background)
 {p.get('bio', '')}
