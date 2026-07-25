@@ -29,7 +29,8 @@ MAX_TOOL_ROUNDS = 8
 # Anti-fabrication gate: link domains that must be backed by a real tool result
 # from THIS turn before Miles is allowed to show them to Kas.
 _URL_RE = re.compile(r"https?://[^\s\"'<>\)\]\}]+")
-_VERIFIED_LINK_DOMAINS = ("calendar.google.com", "docs.google.com", "drive.google.com",
+_VERIFIED_LINK_DOMAINS = ("calendar.google.com", "www.google.com/calendar",
+                          "docs.google.com", "drive.google.com",
                           "sheets.google.com", "meet.google.com", "notion.so", "notion.site")
 
 
