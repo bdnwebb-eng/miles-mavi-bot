@@ -66,6 +66,14 @@ def init_db() -> None:
                 content     TEXT,
                 created_at  TEXT
             );
+            CREATE TABLE IF NOT EXISTS action_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                tid     INTEGER,
+                ts_utc  TEXT,
+                tool    TEXT,
+                summary TEXT,
+                link    TEXT DEFAULT ''
+            );
             """
         )
 
@@ -204,6 +212,42 @@ def recent_messages(tid: int, limit: int) -> list[sqlite3.Row]:
             (tid, limit),
         ).fetchall()
         return list(reversed(rows))
+
+
+# ───────────────────────── action log (verified action ledger, truth gate v6.4) ─────────────────────────
+# Ground truth of every SUCCESSFUL write Miles has actually performed (calendar
+# creates and deletes, Gmail drafts, Docs/Sheets/Slides/Drive writes, Notion
+# property updates, Slack posts). ai.py injects the recent entries into the
+# system prompt so Miles can never honestly claim an unperformed action and
+# never denies one he actually performed. Survives restarts on the Railway
+# volume via HERMES_DB_PATH.
+def _ensure_action_log() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS action_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "tid INTEGER, ts_utc TEXT, tool TEXT, summary TEXT, link TEXT DEFAULT '')"
+        )
+
+
+def log_action(tid: int, tool: str, summary: str, link: str = "") -> None:
+    """Record one VERIFIED successful write action in the ledger."""
+    _ensure_action_log()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO action_log (tid, ts_utc, tool, summary, link) VALUES (?,?,?,?,?)",
+            (tid, datetime.utcnow().isoformat(), tool,
+             (summary or "").strip(), (link or "").strip()),
+        )
+
+
+def recent_actions(tid: int, limit: int = 30) -> list[sqlite3.Row]:
+    """Most recent verified actions, newest first."""
+    _ensure_action_log()
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM action_log WHERE tid=? ORDER BY id DESC LIMIT ?",
+            (tid, limit),
+        ).fetchall()
 
 
 # ───────────────────────── prefs (generic per-user settings) ─────────────────────────
