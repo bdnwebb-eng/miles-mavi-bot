@@ -10,6 +10,7 @@ Persona lives in config/*.yaml; this file assembles it. Three jobs:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 
@@ -18,6 +19,8 @@ from anthropic import Anthropic
 import config_loader as cfg
 import connectors
 import database as db
+
+log = logging.getLogger(__name__)
 
 _client: Anthropic | None = None
 
@@ -58,6 +61,188 @@ def _enforce_link_integrity(reply: str, tool_urls: list[str]) -> str:
     return reply + ("\n\nNote: I removed a link I could not verify against a real action. "
                     "If I did not show you a tool confirmed result, treat it as not done yet.")
 
+# ── Truth gate v6.4 (2026-07-25, 10k harness findings pl-02 and book-04) ──
+# 1. Verified action ledger: every SUCCESSFUL write tool result is logged to the
+#    action_log table and injected into the system prompt as ground truth, so the
+#    model always knows exactly what it has and has not done across turns.
+# 2. Deterministic done-claim backstop: when a turn had ZERO successful writes
+#    AND the ledger is empty (the exact pl-02 shape), a reply that asserts a
+#    first-person completed action gets a plain-language correction appended.
+# 3. Operator alert (Brandon only, never Kas) whenever either gate fires,
+#    debounced to one per gate per 10 minutes.
+
+_WRITE_TOOLS = {
+    "calendar_create_event", "calendar_delete_event", "gmail_draft",
+    "docs_create", "docs_append", "docs_replace",
+    "sheets_create", "sheets_write", "sheets_append", "slides_create",
+    "drive_create_folder", "drive_move", "drive_rename", "drive_trash",
+    "notion_update_property", "slack_post_message",
+}
+
+
+def _log_write_action(tid: int, tool: str, args: dict, out: str) -> bool:
+    """Log a successful write tool result to the verified action ledger.
+    Success is judged by each tool's own return shape (see connectors.py).
+    Returns True when a real write landed this turn (whether or not the ledger
+    insert itself succeeded: the write is real either way)."""
+    if tool not in _WRITE_TOOLS or not isinstance(out, str):
+        return False
+    text = out.strip()
+    if not text or text.startswith("Error"):
+        return False
+    args = args or {}
+    link = ""
+    summary = ""
+    if tool == "calendar_create_event":
+        try:
+            j = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return False
+        if not isinstance(j, dict) or not j.get("verified"):
+            return False  # duplicate refusals and failed creates are not actions
+        summary = (f"Created calendar event '{j.get('summary', '')}' starting "
+                   f"{j.get('start', '')} on calendar '{j.get('calendar', '')}'")
+        link = str(j.get("htmlLink", "") or "")
+    elif tool == "calendar_delete_event":
+        if not text.startswith("Deleted event"):
+            return False
+        summary = (f"Deleted calendar event {args.get('event_id', '')} from calendar "
+                   f"'{args.get('calendar_id', 'primary') or 'primary'}'")
+    elif tool == "gmail_draft":
+        if not text.startswith("Draft saved"):
+            return False
+        summary = (f"Drafted email to {args.get('to', '')} subject "
+                   f"'{args.get('subject', '')}' (saved to Drafts, NOT sent)")
+    elif tool == "docs_create":
+        summary = f"Created Google Doc '{args.get('title', '')}'"
+    elif tool == "docs_append":
+        summary = f"Appended text to Google Doc {args.get('document_id', '')}"
+    elif tool == "docs_replace":
+        summary = f"Edited Google Doc {args.get('document_id', '')} (find and replace)"
+    elif tool == "sheets_create":
+        summary = f"Created Google Sheet '{args.get('title', '')}'"
+    elif tool == "sheets_write":
+        summary = (f"Wrote cells to range {args.get('range', '')} of sheet "
+                   f"{args.get('spreadsheet_id', '')}")
+    elif tool == "sheets_append":
+        summary = (f"Appended rows to range {args.get('range', '')} of sheet "
+                   f"{args.get('spreadsheet_id', '')}")
+    elif tool == "slides_create":
+        summary = f"Created Google Slides deck '{args.get('title', '')}'"
+    elif tool == "drive_create_folder":
+        summary = f"Created Drive folder '{args.get('name', '')}'"
+    elif tool == "drive_move":
+        summary = (f"Moved Drive file {args.get('file_id', '')} into folder "
+                   f"{args.get('new_parent_id', '')}")
+    elif tool == "drive_rename":
+        summary = f"Renamed Drive file {args.get('file_id', '')} to '{args.get('new_name', '')}'"
+    elif tool == "drive_trash":
+        summary = f"Moved Drive file {args.get('file_id', '')} to Trash (recoverable)"
+    elif tool == "notion_update_property":
+        if not text.startswith("Updated"):
+            return False
+        summary = (f"Updated Notion property '{args.get('property', '')}' to "
+                   f"'{args.get('value', '')}' on page {args.get('page_id', '')}")
+    elif tool == "slack_post_message":
+        if not text.startswith("Posted"):
+            return False
+        summary = f"Posted Slack message to channel {args.get('channel', '')}"
+    if not summary:
+        return False
+    if not link:
+        urls = _harvest_urls(text)
+        link = urls[0] if urls else ""
+    try:
+        db.log_action(tid, tool, summary, link)
+    except Exception:  # noqa: BLE001  (ledger bookkeeping must never break a reply)
+        log.warning("[truthgate] failed to log action %s", tool)
+    return True
+
+
+# Strong first-person done-claim patterns (EN, FR, PL). Deliberately conservative:
+# checked only when the turn had zero successful writes AND the ledger is empty,
+# so legitimate references to past logged work are never touched. Negations
+# ("I have not sent", "je n'ai pas envoye", "nie wyslalem") do not match, future
+# tense ("I will draft") does not match, and question sentences are skipped.
+_DONE_CLAIM_PATTERNS = [
+    re.compile(r"\bI(?:'ve| have)\s+(?:already\s+)?(?:drafted|booked|created|sent|"
+               r"scheduled|updated|added|saved|moved|deleted)\b", re.IGNORECASE),
+    re.compile(r"\bit(?:'s| is)\s+(?:already\s+)?(?:in your drafts|booked|done|created)\b",
+               re.IGNORECASE),
+    re.compile(r"^\s*Done\b", re.IGNORECASE),
+    re.compile("\\bj[\u2019']ai\\s+(?:d\u00e9j\u00e0\\s+)?(?:cr\u00e9\u00e9|r\u00e9dig\u00e9|"
+               "r\u00e9serv\u00e9|envoy\u00e9|planifi\u00e9|mis \u00e0 jour)\\b", re.IGNORECASE),
+    re.compile("\\bc[\u2019']est\\s+fait\\b", re.IGNORECASE),
+    re.compile("(?<!nie )\\b(?:utworzy\u0142em|utworzy\u0142am|zapisa\u0142em|zapisa\u0142am|"
+               "zarezerwowa\u0142em|zarezerwowa\u0142am|wys\u0142a\u0142em|wys\u0142a\u0142am|"
+               "zaplanowa\u0142em|zaplanowa\u0142am)\\b", re.IGNORECASE),
+    re.compile("(?<!nie )\\bgotow[eya]\\b", re.IGNORECASE),
+]
+
+
+# Future/conditional guard: "the moment it's done", "once it's booked", "będzie
+# gotowe", "dès que ... c'est fait" are promises, not done-claims. Any sentence
+# containing one of these markers is skipped (conservative: prefer under-firing).
+_FUTURE_GUARD_RE = re.compile(
+    "\\b(will|once|when|until|before|unless|as soon as|the moment|the second|if|"
+    "d\u00e8s que|quand|une fois|si|sera|"
+    "b\u0119dzie|gdy|kiedy|jak tylko)\\b", re.IGNORECASE)
+
+
+def _enforce_action_integrity(reply: str, wrote_this_turn: bool, ledger_nonempty: bool) -> str:
+    """Deterministic backstop for the pl-02 class: a first-person done-claim with
+    zero successful write tool calls this turn and an empty verified ledger is a
+    fabrication by definition. Appends a plain correction instead of letting the
+    false claim stand. Never fires when anything was actually written (this turn
+    or ever), so accurate references to real past work are untouched."""
+    if wrote_this_turn or ledger_nonempty or not reply:
+        return reply
+    fired = False
+    for chunk in re.split(r"[\n]+|(?<=[.!])\s+", reply):
+        s = chunk.strip()
+        if not s or "?" in s or _FUTURE_GUARD_RE.search(s):
+            continue  # questions and future/conditional promises never count
+        if any(p.search(s) for p in _DONE_CLAIM_PATTERNS):
+            fired = True
+            break
+    if not fired:
+        return reply
+    log.warning("[truthgate] action integrity gate fired: done claim with zero "
+                "writes this turn and an empty ledger.")
+    return reply + ("\n\nCorrection: I have to be straight with you. I did not actually "
+                    "perform that action. Nothing has been created or changed. Say the "
+                    "word and I will do it for real right now.")
+
+
+_GATE_ALERT_DEBOUNCE_S = 600
+
+
+def _operator_gate_alert(gate: str, excerpt: str) -> None:
+    """Sentinel-style operator alert to Brandon when a truth gate fires. Debounced
+    to one alert per gate per 10 minutes via sentinel_state. Never messages Kas,
+    never raises."""
+    try:
+        from datetime import datetime as _adt, timezone as _tz
+        key = f"truthgate_alert_{gate}"
+        now = _adt.now(_tz.utc).timestamp()
+        last = db.get_sentinel_state(key)
+        if last:
+            try:
+                if now - float(last) < _GATE_ALERT_DEBOUNCE_S:
+                    return
+            except ValueError:
+                pass
+        db.set_sentinel_state(key, str(now))
+        import sentinel
+        one_line = " ".join((excerpt or "").split())[:160]
+        sentinel.send_ops_alert(
+            f"Miles truth gate: the {gate} gate fired and corrected a reply to Kas. "
+            f"Excerpt: {one_line}"
+        )
+    except Exception as e:  # noqa: BLE001  (alerting must never break a reply)
+        log.warning("[truthgate] operator alert failed: %s", e)
+
+
 IMAGE_DEFAULT_INSTRUCTION = (
     "Kas sent this image. If it is a chat screenshot (WhatsApp, email, etc), identify "
     "the app, the chat or group name, the date, and what matters; extract any "
@@ -92,6 +277,41 @@ def build_system_prompt(tid: int) -> str:
         "the 24th), do NOT pick one: point out the mismatch and ask which she means "
         "before booking anything."
     )
+    # Truth gate v6.4: inject the verified action ledger as ground truth right
+    # after the date line, so the model always knows what it has and has not done.
+    try:
+        _acts = db.recent_actions(tid, 30)
+    except Exception:  # noqa: BLE001
+        _acts = []
+    if _acts:
+        _rows = []
+        for _a in _acts:
+            try:
+                _ts = _dt.fromisoformat(str(_a["ts_utc"]))
+                if _ts.tzinfo is None:
+                    _ts = _ts.replace(tzinfo=ZoneInfo("UTC"))
+                _when = _ts.astimezone(ZoneInfo("Europe/Zurich")).strftime("%a %d %b %H:%M")
+            except (ValueError, TypeError):
+                _when = str(_a["ts_utc"])[:16]
+            _line = f"- [{_when} Geneva] {_a['summary']}"
+            if _a["link"]:
+                _line += f" ({_a['link']})"
+            _rows.append(_line)
+        ledger_block = (
+            "VERIFIED ACTION LEDGER (ground truth). These are the ONLY actions you have "
+            "actually performed recently (newest first, times in Geneva):\n"
+            + "\n".join(_rows) + "\n"
+            "If an action is not in this ledger and not confirmed by a tool result in "
+            "THIS turn, you did NOT do it. Never state, imply, or agree that you sent, "
+            "drafted, booked, created, updated, or deleted anything that is not on this "
+            "list. If asked about something not on the list, say plainly you have not "
+            "done it yet and offer to do it now. This rule outranks politeness and "
+            "confidence."
+        )
+    else:
+        ledger_block = ("VERIFIED ACTION LEDGER: empty. You have performed no actions "
+                        "recently. Any claim otherwise is false.")
+
     p = cfg.persona()
     bot_name = cfg.settings().get("bot", {}).get("name", "Assistant")
     name = p.get("coach_name", "the assistant")
@@ -186,9 +406,13 @@ def build_system_prompt(tid: int) -> str:
         tools_block += (
             "HARD ANTI FABRICATION RULES: NEVER write a link, an event confirmation, a "
             "document name, or any 'done' statement unless it came from a tool result in "
-            "THIS conversation turn. If you did not run the tool, say plainly that you "
-            "have not done it yet and what you need. Fabricating a link or a confirmation "
-            "is the single worst thing you can do.\n"
+            "THIS conversation turn or is listed in the VERIFIED ACTION LEDGER above. If "
+            "you did not run the tool, say plainly that you have not done it yet and what "
+            "you need. Fabricating a link or a confirmation "
+            "is the single worst thing you can do. "
+            "Claiming an unperformed action as done is the single worst failure you can "
+            "commit. When uncertain whether you did something, check the ledger; if "
+            "absent, say you have not.\n"
         )
 
     brand = p.get("brand", "")
@@ -201,6 +425,8 @@ You help with {p.get('niche', '')}. You talk TO the principal AS {name} — warm
 like {name} texting them.
 
 # {date_line}
+
+# {ledger_block}
 
 # Who you are ({name}'s background)
 {p.get('bio', '')}
@@ -285,16 +511,30 @@ def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
 
     # Tool loop: let the model read email/Notion/etc. before it answers.
     # tool_urls collects every URL that appeared in a REAL tool result this turn;
-    # the anti-fabrication gate below only lets those through to Kas.
+    # the anti-fabrication gate below only lets those through to Kas. Ledger links
+    # are pre-seeded: they came from real past tool results, so Miles may repeat
+    # them when Kas asks about work already done (book-04 coherence).
     rounds = 0
     tool_urls: list[str] = []
+    wrote_this_turn = False
+    try:
+        _ledger_rows = db.recent_actions(tid, 30)
+    except Exception:  # noqa: BLE001
+        _ledger_rows = []
+    ledger_nonempty = bool(_ledger_rows)
+    for _a in _ledger_rows:
+        if _a["link"]:
+            tool_urls.append(str(_a["link"]))
     while getattr(resp, "stop_reason", "") == "tool_use" and rounds < MAX_TOOL_ROUNDS:
         messages.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
         results = []
         for block in resp.content:
             if getattr(block, "type", "") == "tool_use":
                 out = connectors.dispatch(block.name, block.input or {})
-                tool_urls.extend(_harvest_urls(out if isinstance(out, str) else str(out)))
+                out_text = out if isinstance(out, str) else str(out)
+                tool_urls.extend(_harvest_urls(out_text))
+                if _log_write_action(tid, block.name, block.input or {}, out_text):
+                    wrote_this_turn = True
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": out})
         messages.append({"role": "user", "content": results})
         resp = client.messages.create(messages=messages, **kwargs)
@@ -307,7 +547,14 @@ def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
     else:
         reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         reply = reply.strip() or "On it. Give me one more line of detail and I'll sort it."
+        _pre_link = reply
         reply = _enforce_link_integrity(reply, tool_urls)
+        if reply != _pre_link:
+            _operator_gate_alert("link", reply)
+        _pre_action = reply
+        reply = _enforce_action_integrity(reply, wrote_this_turn, ledger_nonempty)
+        if reply != _pre_action:
+            _operator_gate_alert("action", reply)
     db.add_message(tid, "assistant", reply)
     return reply
 
