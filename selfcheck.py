@@ -46,7 +46,9 @@ def _fail(msg: str) -> "None":
 REQUIRED_SYMBOLS = {
     "database.py": [("def get_google_token", 1),
                     ("def set_sentinel_state", 1),
-                    ("def get_sentinel_state", 1)],
+                    ("def get_sentinel_state", 1),
+                    ("def log_action", 1),
+                    ("def recent_actions", 1)],
     "connectors.py": [
         ("class GoogleConnector", 1),
         ("def active_tools", 1),
@@ -63,7 +65,10 @@ REQUIRED_SYMBOLS = {
     "web_api.py": [("ThreadingHTTPServer", 1), ("def start", 1),
                    ("Dashboard API", 1), ("/api/health", 1)],
     "ai.py": [("CURRENT DATE AND TIME", 1), ("def _enforce_link_integrity", 1),
-              ("HARD ANTI FABRICATION RULES", 1)],
+              ("HARD ANTI FABRICATION RULES", 1),
+              ("def _enforce_action_integrity", 1),
+              ("def _log_write_action", 1),
+              ("VERIFIED ACTION LEDGER", 3)],
     "bot.py": [("def main", 1), ("boot_selftest", 1), ("sentinel_watchdog", 1)],
     "sentinel.py": [("def run_diagnostics", 1), ("def run_watchdog", 1),
                     ("def boot_selftest", 1), ("def send_ops_alert", 1),
