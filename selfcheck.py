@@ -58,14 +58,18 @@ REQUIRED_SYMBOLS = {
         ("notion_query_database", 1),
         ("docs_create", 1),
         ("sheets_create", 1),
+        ('"timezone": {"type": "string"', 1),
     ],
     "web_api.py": [("ThreadingHTTPServer", 1), ("def start", 1),
                    ("Dashboard API", 1), ("/api/health", 1)],
-    "ai.py": [("CURRENT DATE AND TIME", 1)],
+    "ai.py": [("CURRENT DATE AND TIME", 1), ("def _enforce_link_integrity", 1),
+              ("HARD ANTI FABRICATION RULES", 1)],
     "bot.py": [("def main", 1), ("boot_selftest", 1), ("sentinel_watchdog", 1)],
     "sentinel.py": [("def run_diagnostics", 1), ("def run_watchdog", 1),
-                    ("def boot_selftest", 1), ("def send_ops_alert", 1)],
-    "handlers.py": [("def sentinel_cmd", 1)],
+                    ("def boot_selftest", 1), ("def send_ops_alert", 1),
+                    ("def _c_elevenlabs_stt", 1)],
+    "handlers.py": [("def sentinel_cmd", 1), ("def voice_note_handler", 1),
+                    ("filters.VOICE", 1)],
 }
 
 
@@ -129,6 +133,19 @@ def pass_yaml() -> None:
     print(f"[selfcheck] YAML valid ({len(cfg_files)} files).")
 
 
+def pass_settings() -> None:
+    """The action chain budget must stay at 3000: an 800 token budget truncates
+    multi tool chains and is exactly what pushed the model into fabricating."""
+    import yaml
+    path = os.path.join(HERE, "config", "settings.yaml")
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    mt = (data.get("ai") or {}).get("max_tokens")
+    if mt != 3000:
+        _fail(f"settings.yaml ai.max_tokens must be 3000, found {mt}.")
+    print("[selfcheck] settings OK (ai.max_tokens 3000).")
+
+
 def pass_imports() -> None:
     # Only the import safe core. handlers.py / bot.py pull in python-telegram-bot,
     # which may be absent in a bare staging shell; py_compile already vetted them.
@@ -148,6 +165,7 @@ def main() -> None:
     pass_compile()
     pass_symbols()
     pass_yaml()
+    pass_settings()
     pass_imports()
     print("SELFCHECK PASS")
 

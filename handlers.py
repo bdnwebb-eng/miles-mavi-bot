@@ -18,12 +18,15 @@ from telegram.ext import (
 
 import asyncio
 import base64
+import logging
 
 import ai
 import config_loader as cfg
 import connectors
 import database as db
 import tts
+
+log = logging.getLogger("hermes.handlers")
 
 # Conversation states tracked in context.user_data
 AWAITING_GOAL = "awaiting_goal"
@@ -366,6 +369,62 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_voice(voice=audio)
 
 
+# ───────────────────────── voice notes in (ElevenLabs STT) ─────────────────────────
+async def voice_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kas sends a voice note (or an audio file); Miles transcribes it with
+    ElevenLabs Speech to Text and handles it exactly like a typed message,
+    including the spoken reply when her voice preference is on. Never silent:
+    any failure gets a warm retry line."""
+    tid = update.effective_user.id
+    if context.user_data.get("state") == AWAITING_CODE or not _is_allowed(tid):
+        await update.message.reply_text("Please /start and enter your access code first.")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    retry_line = "I could not make that one out, mind sending it again or typing it?"
+    transcript = None
+    try:
+        media = update.message.voice or update.message.audio
+        if media is None:
+            await update.message.reply_text(retry_line)
+            return
+        if not tts.stt_enabled():
+            log.warning("Voice note received but ELEVENLABS_API_KEY is missing.")
+            await update.message.reply_text(retry_line)
+            return
+        file = await media.get_file()
+        data = await file.download_as_bytearray()
+        mime = getattr(media, "mime_type", None) or "audio/ogg"
+        fname = ("voice.ogg" if update.message.voice
+                 else (getattr(media, "file_name", None) or "audio.bin"))
+        transcript = await asyncio.to_thread(tts.transcribe, bytes(data), mime, fname)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Voice note error: %s", e)
+        transcript = None
+    if not transcript:
+        await update.message.reply_text(retry_line)
+        return
+
+    try:
+        reply = await asyncio.to_thread(ai.coach_reply, tid, "(voice note) " + transcript)
+    except Exception as e:  # noqa: BLE001
+        log.warning("AI error on voice note: %s", e)
+        reply = "I hit a snag reaching my brain just now. Try again in a moment."
+    await update.message.reply_text(reply)
+
+    # Long term memory upkeep (self-gated, cheap, never blocks the reply)
+    asyncio.create_task(asyncio.to_thread(ai.maybe_extract_memories, tid))
+
+    # Voice note reply (opt-in via /voice) when ElevenLabs is configured
+    if tts.enabled() and db.get_pref(tid, "voice", "off") == "on":
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action="record_voice"
+        )
+        audio = await asyncio.to_thread(tts.synthesize, reply)
+        if audio:
+            await update.message.reply_voice(voice=audio)
+
+
 # ───────────────────────── voice toggle ─────────────────────────
 async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tid = update.effective_user.id
@@ -611,5 +670,10 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("energy", energy_cmd))
     app.add_handler(CommandHandler("sentinel", sentinel_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_note_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    if tts.stt_enabled():
+        log.info("Voice input: armed (ElevenLabs STT)")
+    else:
+        log.info("Voice input: dormant (ELEVENLABS_API_KEY missing); voice notes get a friendly retry line")

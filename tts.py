@@ -16,6 +16,7 @@ import config_loader as cfg
 log = logging.getLogger("miles.tts")
 
 MAX_TTS_CHARS = 900  # cost control: cap voice note length
+STT_MODEL = "scribe_v1"
 
 
 def enabled() -> bool:
@@ -23,6 +24,36 @@ def enabled() -> bool:
     return bool(os.getenv("ELEVENLABS_API_KEY")) and bool(
         cfg.settings().get("voice", {}).get("voice_id")
     )
+
+
+def stt_enabled() -> bool:
+    """True when speech to text can run (a key exists)."""
+    return bool(os.getenv("ELEVENLABS_API_KEY"))
+
+
+def transcribe(audio: bytes, mime_type: str = "audio/ogg",
+               filename: str = "voice.ogg") -> str | None:
+    """Transcribe a Telegram voice note (or audio file) with ElevenLabs Speech to
+    Text. Returns the transcript text, or None on any failure; the caller degrades
+    to a friendly retry message, never silence."""
+    key = os.getenv("ELEVENLABS_API_KEY")
+    if not key or not audio:
+        return None
+    try:
+        r = httpx.post(
+            "https://api.elevenlabs.io/v1/speech-to-text",
+            headers={"xi-api-key": key},
+            files={"file": (filename, audio, mime_type)},
+            data={"model_id": STT_MODEL},
+            timeout=60,  # long voice notes take a while
+        )
+        if r.status_code == 200:
+            text = (r.json().get("text") or "").strip()
+            return text or None
+        log.warning("STT failed %s: %s", r.status_code, r.text[:200])
+    except Exception as e:  # noqa: BLE001
+        log.warning("STT error: %s", e)
+    return None
 
 
 def synthesize(text: str) -> bytes | None:

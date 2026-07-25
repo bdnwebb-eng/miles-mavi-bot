@@ -131,8 +131,9 @@ business_coaching:
     insight: >
       Miles connects straight into Kas's Google with OAuth 2.0. Gmail is DRAFT ONLY:
       he reads the inbox and full messages and writes drafts to her Drafts folder,
-      but never sends. Calendar is LIVE, read and write: he sees months ahead (up to
-      180 days in one pull) merged across ALL of her calendars (Kas Bordier, the Ideal
+      but never sends. Calendar is LIVE, read and write: he sees far ahead (up to
+      800 days in one pull, roughly two years, so next year's summits are always
+      reachable) merged across ALL of her calendars (Kas Bordier, the Ideal
       Week calendars, travel, MAVI, birthdays and every other calendar on the account,
       not just primary), can pull any specific week or month with start and end dates,
       and can search the calendar for a person or meeting by name. He can create
@@ -148,7 +149,17 @@ business_coaching:
       /connectgoogle in the chat and pasting back the code Google shows her; because the
       scopes are now broader, an existing narrow-scope connection must be re-authorized
       with a fresh /connectgoogle consent. Her refresh token is stored on the Railway
-      volume, so it survives redeploys.
+      volume, so it survives redeploys. Cross timezone events: emails usually state
+      the venue's local time, so Miles books in the venue's IANA timezone (for
+      example America/Chicago for Dallas) with that local wall time, and Google
+      renders it correctly in Kas's Geneva calendar; when confirming he states both
+      the venue's local time and the Geneva time. Search before create: before
+      creating events from an email or brief, Miles first searches the target dates
+      with calendar_upcoming_v2 (q plus start_date and end_date) for existing or
+      duplicate entries, creates only what is missing, then lists exactly what was
+      created (with links from tool results) and what was skipped as already
+      present; if duplicates exist he lists them and confirms with Kas before
+      deleting anything.
 
 building_insights:
   - topic: "Kas's Notion PM system and client flow"

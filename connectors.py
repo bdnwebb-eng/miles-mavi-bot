@@ -240,7 +240,7 @@ class CalendarConnector(Connector):
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "days": {"type": "integer", "description": "Window in days ahead, max 60. Default 7."},
+                        "days": {"type": "integer", "description": "Window in days ahead, max 800. Default 7."},
                         "calendar": {"type": "string", "description": "One feed label to limit to. Default all."},
                     },
                 },
@@ -298,7 +298,7 @@ class CalendarConnector(Connector):
     def run(self, tool_name: str, args: dict) -> str:
         if tool_name != "calendar_upcoming":
             return f"Error: unknown calendar tool {tool_name}."
-        days = min(int(args.get("days", 7) or 7), 60)
+        days = min(int(args.get("days", 7) or 7), 800)
         only = args.get("calendar")
         now = datetime.now(LOCAL_TZ)
         horizon = now + timedelta(days=days)
@@ -915,7 +915,8 @@ class GoogleConnector(Connector):
                 "description": (
                     "List events from Kas's live Google Calendar (read), merged across ALL of her "
                     "calendars, not just primary. Times are Europe/Zurich. Default window is the next "
-                    "30 days; you may request up to 180 days so Kas can see months ahead. Use "
+                    "30 days; you may request up to 800 days, roughly two years ahead, so Kas can see "
+                    "far future events (a summit next year is always reachable). Use "
                     "start_date and end_date for a specific week or month (they override days). Use q "
                     "to find a person or meeting by name. The payload always states the exact window "
                     "covered and a complete flag; if complete is false, tell Kas exactly what you "
@@ -924,7 +925,7 @@ class GoogleConnector(Connector):
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "days": {"type": "integer", "description": "Window ahead in days, up to 180. Default 30."},
+                        "days": {"type": "integer", "description": "Window ahead in days, up to 800 (roughly two years ahead). Default 30."},
                         "start_date": {"type": "string", "description": "Optional window start, YYYY-MM-DD, Europe/Zurich. Overrides days."},
                         "end_date": {"type": "string", "description": "Optional window end, YYYY-MM-DD inclusive, Europe/Zurich. Overrides days."},
                         "q": {"type": "string", "description": "Optional free text search, e.g. a person or meeting name. Passed to Google's event search."},
@@ -940,8 +941,12 @@ class GoogleConnector(Connector):
                     "then reports success, returning the event id, the htmlLink and the calendar it "
                     "landed on (default primary, Kas's main kas@maviliving calendar). ALWAYS give Kas "
                     "the htmlLink as proof and name the calendar it went on. If this tool returns an "
-                    "error the event was NOT created: never tell Kas it is booked. Times are "
-                    "Europe/Zurich; pass RFC3339 datetimes like 2026-07-20T14:00:00."
+                    "error the event was NOT created: never tell Kas it is booked. Default timezone "
+                    "is Europe/Zurich; pass RFC3339 datetimes like 2026-07-20T14:00:00. For events "
+                    "happening in another city, pass that city's timezone (e.g. America/Chicago for "
+                    "Dallas) with the local wall time; Google shows it correctly in Kas's calendar "
+                    "automatically. When confirming to Kas, state BOTH the event's local time and "
+                    "the Geneva time."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -950,6 +955,7 @@ class GoogleConnector(Connector):
                         "start_iso": {"type": "string", "description": "Start, RFC3339 e.g. 2026-07-20T14:00:00."},
                         "end_iso": {"type": "string", "description": "End, RFC3339 e.g. 2026-07-20T15:00:00."},
                         "description": {"type": "string", "description": "Optional event notes."},
+                        "timezone": {"type": "string", "description": "IANA timezone the start_iso and end_iso wall times are in, e.g. Europe/Zurich or America/Chicago. Default Europe/Zurich. Use the venue city's timezone for events happening elsewhere."},
                         "calendar_id": {"type": "string", "description": "Calendar id. Default 'primary'."},
                     },
                     "required": ["summary", "start_iso", "end_iso"],
@@ -1220,7 +1226,7 @@ class GoogleConnector(Connector):
                     days = int(args.get("days", 30) or 30)
                 except (TypeError, ValueError):
                     days = 30
-                days = max(1, min(days, 180))
+                days = max(1, min(days, 800))
                 start_dt = now
                 if sd:
                     try:
@@ -1388,10 +1394,16 @@ class GoogleConnector(Connector):
                 end_iso = str(args.get("end_iso", "")).strip()
                 if not (summary and start_iso and end_iso):
                     return "Error: need summary, start_iso and end_iso (RFC3339, e.g. 2026-07-20T14:00:00)."
+                tz_name = str(args.get("timezone", "") or "").strip() or "Europe/Zurich"
+                try:
+                    ZoneInfo(tz_name)
+                except Exception:  # noqa: BLE001
+                    return (f"Error: '{tz_name}' is not a valid IANA timezone, so the event was "
+                            "NOT created. Pass one like Europe/Zurich or America/Chicago.")
                 body_payload: dict = {
                     "summary": summary,
-                    "start": {"dateTime": start_iso, "timeZone": "Europe/Zurich"},
-                    "end": {"dateTime": end_iso, "timeZone": "Europe/Zurich"},
+                    "start": {"dateTime": start_iso, "timeZone": tz_name},
+                    "end": {"dateTime": end_iso, "timeZone": tz_name},
                 }
                 desc = str(args.get("description", "") or "").strip()
                 if desc:

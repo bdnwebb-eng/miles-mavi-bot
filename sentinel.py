@@ -467,6 +467,31 @@ def _c_elevenlabs() -> dict:
                   IMPORTANT)
 
 
+def _c_elevenlabs_stt() -> dict:
+    """Live key validation: /v1/user with the key must answer 200. A scoped key
+    that cannot transcribe (missing speech_to_text permission) shows up here as
+    amber instead of silently killing voice note input."""
+    label = "ElevenLabs STT"
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    if not key:
+        return _check("elevenlabs_stt", label, AMBER, "ELEVENLABS_API_KEY missing.",
+                      "Voice note transcription is off. Set ELEVENLABS_API_KEY.", IMPORTANT)
+    try:
+        r = httpx.get("https://api.elevenlabs.io/v1/user",
+                      headers={"xi-api-key": key}, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        return _check("elevenlabs_stt", label, AMBER, f"probe failed: {str(e)[:120]}",
+                      "Network or ElevenLabs outage; voice notes may not transcribe.", IMPORTANT)
+    if r.status_code == 200:
+        return _check("elevenlabs_stt", label, GREEN,
+                      "key valid (user probe 200); voice note input live.", "", IMPORTANT)
+    return _check("elevenlabs_stt", label, AMBER,
+                  f"key rejected by user probe ({r.status_code}).",
+                  "Key exists but is invalid or lacks permissions. Issue a full permission "
+                  "ElevenLabs key (speech_to_text and user_read) and update "
+                  "ELEVENLABS_API_KEY on Railway.", IMPORTANT)
+
+
 def _c_config() -> dict:
     label = "Config files"
     import config_loader as cfg
@@ -528,6 +553,7 @@ def run_diagnostics(deep: bool = False) -> dict:
     checks.append(_safe("dashboard_api", "Dashboard API", IMPORTANT, _c_dashboard))
     checks.append(_safe("clock", "System clock", IMPORTANT, _c_clock))
     checks.append(_safe("elevenlabs", "ElevenLabs", IMPORTANT, _c_elevenlabs))
+    checks.append(_safe("elevenlabs_stt", "ElevenLabs STT", IMPORTANT, _c_elevenlabs_stt))
     checks.append(_safe("config", "Config files", IMPORTANT, _c_config))
 
     counts = {GREEN: 0, AMBER: 0, RED: 0}

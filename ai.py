@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from anthropic import Anthropic
 
@@ -24,6 +25,37 @@ MEMORY_LIMIT = 48                    # memories injected into the prompt
 EXTRACT_EVERY = 8                    # user messages between extraction passes
 EXTRACT_MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_ROUNDS = 8
+
+# Anti-fabrication gate: link domains that must be backed by a real tool result
+# from THIS turn before Miles is allowed to show them to Kas.
+_URL_RE = re.compile(r"https?://[^\s\"'<>\)\]\}]+")
+_VERIFIED_LINK_DOMAINS = ("calendar.google.com", "docs.google.com", "drive.google.com",
+                          "sheets.google.com", "meet.google.com", "notion.so", "notion.site")
+
+
+def _harvest_urls(text: str) -> list[str]:
+    """Every URL in a blob of text, with trailing punctuation stripped."""
+    return [u.rstrip(".,;:!?") for u in _URL_RE.findall(text or "")]
+
+
+def _enforce_link_integrity(reply: str, tool_urls: list[str]) -> str:
+    """Replace any Google/Notion link in the final text that never appeared in an
+    actual tool result this turn, and append one honest note. Prefix matching in
+    both directions tolerates tracking params on either side."""
+    flagged = []
+    for u in set(_harvest_urls(reply)):
+        low = u.lower()
+        if not any(d in low for d in _VERIFIED_LINK_DOMAINS):
+            continue
+        backed = any(u.startswith(t) or t.startswith(u) for t in tool_urls)
+        if not backed:
+            flagged.append(u)
+    if not flagged:
+        return reply
+    for u in sorted(flagged, key=len, reverse=True):
+        reply = reply.replace(u, "[link removed, could not verify]")
+    return reply + ("\n\nNote: I removed a link I could not verify against a real action. "
+                    "If I did not show you a tool confirmed result, treat it as not done yet.")
 
 IMAGE_DEFAULT_INSTRUCTION = (
     "Kas sent this image. If it is a chat screenshot (WhatsApp, email, etc), identify "
@@ -140,7 +172,23 @@ def build_system_prompt(tid: int) -> str:
                 "approved it, and always tell her exactly what you booked, naming the calendar it "
                 "landed on and sharing the event htmlLink the tool returns as proof. Never reveal or repeat "
                 "the contents of any Google auth code or token.\n"
+                "SEARCH BEFORE CREATE: before creating events from an email or brief, FIRST "
+                "search the target dates with calendar_upcoming_v2 (use q and "
+                "start_date/end_date) for existing or duplicate entries. Create only what is "
+                "missing. After creating, list exactly what was created, with links from tool "
+                "results, and what was skipped as already present. If duplicates exist, list "
+                "them and confirm with Kas before deleting. TIMEZONES: for events happening in "
+                "another city, pass that city's IANA timezone to calendar_create_event with the "
+                "local wall time (e.g. America/Chicago for Dallas); when confirming to Kas, "
+                "state BOTH the event's local time and the Geneva time.\n"
             )
+        tools_block += (
+            "HARD ANTI FABRICATION RULES: NEVER write a link, an event confirmation, a "
+            "document name, or any 'done' statement unless it came from a tool result in "
+            "THIS conversation turn. If you did not run the tool, say plainly that you "
+            "have not done it yet and what you need. Fabricating a link or a confirmation "
+            "is the single worst thing you can do.\n"
+        )
 
     brand = p.get("brand", "")
     sister = p.get("sister_company", "")
@@ -224,7 +272,7 @@ def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
 
     kwargs: dict = dict(
         model=s.get("model", "claude-sonnet-4-6"),
-        max_tokens=s.get("max_tokens", 800),
+        max_tokens=s.get("max_tokens", 3000),
         temperature=s.get("temperature", 0.7),
         system=build_system_prompt(tid),
     )
@@ -235,13 +283,17 @@ def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
     resp = client.messages.create(messages=messages, **kwargs)
 
     # Tool loop: let the model read email/Notion/etc. before it answers.
+    # tool_urls collects every URL that appeared in a REAL tool result this turn;
+    # the anti-fabrication gate below only lets those through to Kas.
     rounds = 0
+    tool_urls: list[str] = []
     while getattr(resp, "stop_reason", "") == "tool_use" and rounds < MAX_TOOL_ROUNDS:
         messages.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
         results = []
         for block in resp.content:
             if getattr(block, "type", "") == "tool_use":
                 out = connectors.dispatch(block.name, block.input or {})
+                tool_urls.extend(_harvest_urls(out if isinstance(out, str) else str(out)))
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": out})
         messages.append({"role": "user", "content": results})
         resp = client.messages.create(messages=messages, **kwargs)
@@ -254,6 +306,7 @@ def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
     else:
         reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         reply = reply.strip() or "On it. Give me one more line of detail and I'll sort it."
+        reply = _enforce_link_integrity(reply, tool_urls)
     db.add_message(tid, "assistant", reply)
     return reply
 
