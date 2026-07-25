@@ -1400,6 +1400,54 @@ class GoogleConnector(Connector):
                 except Exception:  # noqa: BLE001
                     return (f"Error: '{tz_name}' is not a valid IANA timezone, so the event was "
                             "NOT created. Pass one like Europe/Zurich or America/Chicago.")
+                # Idempotency guard (2026-07-25, from the 10k test harness): the model
+                # sometimes re-issues an identical create after an approval turn, which
+                # lands duplicate events on the principal's real calendar. Read the
+                # minute around the requested start and refuse to create an event whose
+                # normalized title and start instant match an existing one. Fail open:
+                # if this probe errors, the create proceeds (the guard must never block
+                # a legitimate booking).
+                def _norm_title(s: str) -> str:
+                    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+                try:
+                    g_start = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                    if g_start.tzinfo is None:
+                        g_start = g_start.replace(tzinfo=ZoneInfo(tz_name))
+                    probe = http.get(
+                        f"{self._CAL}/calendars/{cal_id}/events", headers=h, params={
+                            "timeMin": (g_start - timedelta(minutes=1)).isoformat(),
+                            "timeMax": (g_start + timedelta(minutes=1)).isoformat(),
+                            "singleEvents": "true", "maxResults": 50,
+                        })
+                    if probe.status_code < 400:
+                        for ex in probe.json().get("items", []) or []:
+                            if _norm_title(ex.get("summary", "")) != _norm_title(summary):
+                                continue
+                            exs = (ex.get("start") or {}).get("dateTime") or ""
+                            try:
+                                ex_dt = datetime.fromisoformat(exs.replace("Z", "+00:00"))
+                                if ex_dt.tzinfo is None:
+                                    ex_tz = (ex.get("start") or {}).get("timeZone") or tz_name
+                                    ex_dt = ex_dt.replace(tzinfo=ZoneInfo(ex_tz))
+                            except ValueError:
+                                continue
+                            if ex_dt == g_start:
+                                return json.dumps({
+                                    "created": False,
+                                    "duplicate_of": {
+                                        "id": ex.get("id", ""),
+                                        "summary": ex.get("summary", ""),
+                                        "start": exs,
+                                        "htmlLink": ex.get("htmlLink", ""),
+                                    },
+                                    "note": ("NOT created: an identical event (same title, "
+                                             "same start) already exists on this calendar. "
+                                             "Tell the principal it is already booked and "
+                                             "share the EXISTING link above. Do not create "
+                                             "it again."),
+                                }, ensure_ascii=False)
+                except Exception:  # noqa: BLE001
+                    pass  # fail open: a broken guard must never block a real booking
                 body_payload: dict = {
                     "summary": summary,
                     "start": {"dateTime": start_iso, "timeZone": tz_name},
@@ -1703,6 +1751,8 @@ def dispatch(tool_name: str, args: dict) -> str:
 
 
 # v6.2: calendar depth + search, verified writes with proof links, truncation audit (2026-07-24)
+# v6.3: create-event idempotency guard (duplicate title+start refused) + gate covers
+#       www.google.com/calendar links (2026-07-25, 10k test harness findings)
 def status_lines() -> list[str]:
     lines = []
     for c in CONNECTORS:
