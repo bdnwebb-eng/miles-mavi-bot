@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -202,6 +203,48 @@ def _senses() -> dict:
     }
 
 
+# Warm cache for the default dashboard window. Building the payload does live
+# Notion + multi calendar + Gmail calls and takes ~6s, which loses the race
+# against a browser fetch timeout (the dashboard always fell back to snapshot).
+# A background thread keeps the days=7 payload warm so the endpoint answers in
+# milliseconds. Other day windows (verification) still build live on demand.
+_CACHE_LOCK = threading.Lock()
+_STATUS_CACHE = {"payload": None, "built_at": 0.0}
+_CACHE_TTL = 240          # a fresh build is served for up to 4 minutes
+_REFRESH_EVERY = 120      # background refresher cadence in seconds
+
+
+def get_cached_status(days: int = 7) -> dict:
+    """Return the warm days=7 payload instantly when possible; build live for
+    any other window or a cold/stale cache."""
+    if days != 7:
+        return build_payload(days)
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _STATUS_CACHE["payload"]
+        age = now - _STATUS_CACHE["built_at"]
+    if cached is not None and age < _CACHE_TTL:
+        return cached
+    payload = build_payload(7)
+    with _CACHE_LOCK:
+        _STATUS_CACHE["payload"] = payload
+        _STATUS_CACHE["built_at"] = time.time()
+    return payload
+
+
+def _refresh_cache_loop() -> None:
+    """Rebuild the warm days=7 payload on a cadence so page loads are instant."""
+    while True:
+        try:
+            payload = build_payload(7)
+            with _CACHE_LOCK:
+                _STATUS_CACHE["payload"] = payload
+                _STATUS_CACHE["built_at"] = time.time()
+        except Exception as e:  # noqa: BLE001
+            log.warning("status cache refresh failed: %s", e)
+        time.sleep(_REFRESH_EVERY)
+
+
 def build_payload(days: int = 7) -> dict:
     """Assemble the whole dashboard payload. Every section is isolated so one
     failing source degrades to null instead of 500-ing the endpoint."""
@@ -341,7 +384,7 @@ class _Handler(BaseHTTPRequestHandler):
                 days = 7
             days = max(1, min(days, 60))
             try:
-                payload = build_payload(days)
+                payload = get_cached_status(days)
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             except Exception as e:  # noqa: BLE001
                 log.exception("dashboard payload build failed")
@@ -364,7 +407,9 @@ def start() -> int:
     server.daemon_threads = True
     t = threading.Thread(target=server.serve_forever, name="web_api", daemon=True)
     t.start()
-    log.info("Dashboard API on :%s", port)
+    # Keep the dashboard payload warm so page loads answer instantly.
+    threading.Thread(target=_refresh_cache_loop, name="status_cache", daemon=True).start()
+    log.info("Dashboard API on :%s (warm cache refresher armed)", port)
     print(f"[web_api] Dashboard API listening on 0.0.0.0:{port}", flush=True)
     return port
 
