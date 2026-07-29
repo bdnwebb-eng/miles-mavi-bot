@@ -75,6 +75,20 @@ REQUIRED_SYMBOLS = {
                     ("def _c_elevenlabs_stt", 1)],
     "handlers.py": [("def sentinel_cmd", 1), ("def voice_note_handler", 1),
                     ("filters.VOICE", 1)],
+    # v6.6: the scheduled Slack posts MUST stay on the live Google path (the
+    # 2026-07-28 EOD said "nothing scheduled" on a back to back day because this
+    # file quietly still used the retired ICS connector).
+    "slack_rhythm.py": [("calendar_upcoming_v2", 1), ("GoogleConnector", 1),
+                        ("UNAVAILABLE", 3), ("gmail_recent", 1),
+                        ("def _alert_operator", 1)],
+}
+
+# Symbols that must NOT appear anywhere in a file: a reappearing forbidden symbol
+# means a stale copy of the file (pre v6.6) is about to ship. file -> [needle].
+FORBIDDEN_SYMBOLS = {
+    "slack_rhythm.py": ["CalendarConnector", "calendar_upcoming\""],
+    "web_api.py": ["CalendarConnector", "calendar_upcoming\""],
+    "connectors.py": ["class CalendarConnector"],
 }
 
 
@@ -118,7 +132,18 @@ def pass_symbols() -> None:
             if got < want:
                 _fail(f"{fname}: expected >= {want} of '{needle}', found {got} "
                       f"(file may be truncated or a symbol was lost).")
-    print(f"[selfcheck] critical symbols OK ({len(REQUIRED_SYMBOLS)} files).")
+    for fname, needles in FORBIDDEN_SYMBOLS.items():
+        path = os.path.join(HERE, fname)
+        if not os.path.exists(path):
+            _fail(f"required file missing: {fname}")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        for needle in needles:
+            if needle in src:
+                _fail(f"{fname}: forbidden symbol '{needle}' present. A stale "
+                      "pre v6.6 copy of this file is about to ship. Refuse.")
+    print(f"[selfcheck] critical symbols OK ({len(REQUIRED_SYMBOLS)} files, "
+          f"{len(FORBIDDEN_SYMBOLS)} forbidden-symbol files).")
 
 
 def pass_yaml() -> None:

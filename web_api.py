@@ -40,7 +40,9 @@ import database as db
 log = logging.getLogger("hermes.web_api")
 
 LOOP_SCHEDULE = {
+    "cold_scan": "daily 07:35 Geneva",
     "slack_agenda": "daily 07:40 #agenda",
+    "slack_eod": "daily 18:30 #agenda",
     "whatsapp_digest": "daily 06:45",
 }
 
@@ -120,47 +122,40 @@ def _projects() -> list:
 
 
 def _calendar(days: int = 7) -> dict:
-    """Upcoming events. Google (live) preferred, ICS feeds as fallback.
+    """Upcoming events from the ONE calendar data path in the system:
+    GoogleConnector.calendar_upcoming_v2 (live, every calendar, Sentinel probed).
+    v6.6: the silent ICS fallback is gone. If Google is not connected the payload
+    says complete=false with an explicit error, so the dashboard shows "not live"
+    instead of a confidently empty calendar (the 2026-07-28 failure class).
     Titles and times only. Returns {"events": [...], "meta": {window, complete, count}}."""
     gc = connectors.GoogleConnector()
-    if gc.configured():
-        raw = gc.run("calendar_upcoming_v2", {"days": days})
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return {"events": [], "meta": {"window": None, "complete": False,
-                                           "error": raw[:200]}}
-        if isinstance(data, dict):
-            items = data.get("events", []) or []
-            meta = {"window": data.get("window"), "complete": data.get("complete"),
-                    "count": data.get("count")}
-            if data.get("ideal_week_daily"):
-                meta["ideal_week_daily"] = data["ideal_week_daily"]
-            if data.get("note"):
-                meta["note"] = data["note"]
-        else:
-            items = data if isinstance(data, list) else []
-            meta = {"window": None, "complete": True, "count": len(items)}
-        events = [
-            {"summary": e.get("summary", ""), "start": e.get("start", ""),
-             "end": e.get("end", ""), "location": e.get("location", ""),
-             "calendar": e.get("calendar", "")}
-            for e in items
-        ]
-        return {"events": events, "meta": meta}
-    cc = connectors.CalendarConnector()
-    if cc.configured():
-        raw = cc.run("calendar_upcoming", {"days": days})
-        items = json.loads(raw) if raw.strip().startswith("[") else []
-        events = [
-            {"summary": e.get("summary", ""), "start": e.get("start", ""),
-             "end": e.get("end", ""), "location": e.get("location", "")}
-            for e in items if "error" not in e
-        ]
-        return {"events": events,
-                "meta": {"window": f"next {days} days (ICS fallback)",
-                         "complete": True, "count": len(events)}}
-    return {"events": [], "meta": {"window": None, "complete": True, "count": 0}}
+    if not gc.configured():
+        return {"events": [], "meta": {"window": None, "complete": False,
+                                       "error": "google not connected"}}
+    raw = gc.run("calendar_upcoming_v2", {"days": days})
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {"events": [], "meta": {"window": None, "complete": False,
+                                       "error": raw[:200]}}
+    if isinstance(data, dict):
+        items = data.get("events", []) or []
+        meta = {"window": data.get("window"), "complete": data.get("complete"),
+                "count": data.get("count")}
+        if data.get("ideal_week_daily"):
+            meta["ideal_week_daily"] = data["ideal_week_daily"]
+        if data.get("note"):
+            meta["note"] = data["note"]
+    else:
+        items = data if isinstance(data, list) else []
+        meta = {"window": None, "complete": True, "count": len(items)}
+    events = [
+        {"summary": e.get("summary", ""), "start": e.get("start", ""),
+         "end": e.get("end", ""), "location": e.get("location", ""),
+         "calendar": e.get("calendar", "")}
+        for e in items
+    ]
+    return {"events": events, "meta": meta}
 
 
 def _inbox():
@@ -182,21 +177,15 @@ def _inbox():
 
 
 def _senses() -> dict:
-    """Connector -> status string. 'live' / 'partial' / 'pending'."""
+    """Connector -> status string. 'live' / 'pending'. v6.6: calendar truth comes
+    only from the Google token (the ICS 'partial' state is gone with the ICS path)."""
     has_google_token = bool(db.get_google_token())
-    ics_configured = connectors.CalendarConnector().configured()
     email_imap = connectors.EmailConnector().configured()
-    if has_google_token:
-        cal = "live"
-    elif ics_configured:
-        cal = "partial"
-    else:
-        cal = "pending"
     return {
         "notion": "live" if connectors.NotionConnector().configured() else "pending",
         "slack": "live" if connectors.SlackConnector().configured() else "pending",
         "whatsapp": "live",
-        "calendar": cal,
+        "calendar": "live" if has_google_token else "pending",
         "email": "live" if (has_google_token or email_imap) else "pending",
         "google": "live" if has_google_token else "pending",
         "instagram": "pending",
@@ -281,12 +270,15 @@ def build_payload(days: int = 7) -> dict:
     live_now = sum(1 for p in projects if p.get("live"))
     cold_count = sum(1 for p in projects if p.get("cold"))
 
+    # v6.6: podcasts_booked removed. It was a hardcoded 1 with no live source,
+    # exactly the "confident number nobody is maintaining" class the dashboard
+    # honesty pass exists to kill. The dashboard hides the tile when absent;
+    # re-add only when a real tracker (Notion) feeds it.
     kpis = {
         "projects_total": len(projects),
         "live_now": live_now,
         "now_tier": now_tier,
         "cold_count": cold_count,
-        "podcasts_booked": 1,
         "senses_live": senses_live,
     }
 

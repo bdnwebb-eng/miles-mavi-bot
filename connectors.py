@@ -12,9 +12,6 @@ Currently shipped:
              "address": "kas@maviliving.com", "app_password": "..."}, ...]
              Per the Jul 10 meeting: kas@maviliving.com is the only sending
              identity; every other account is historical context, read only.
-  calendar : ICS feeds, read only. CALENDAR_ICS_URLS, a JSON object:
-             {"KE": "https://...basic.ics", "Travel": "https://...basic.ics"}
-             Covers the shared travel calendar and subscription calendars.
   notion   : Notion REST API (search + read + scoped project writes)
              NOTION_API_KEY  [optional NOTION_PROJECTS_DB_ID for the cold scan]
 
@@ -205,131 +202,6 @@ class EmailConnector(Connector):
                 pass
 
 
-# ───────────────────── calendar (ICS feeds, read only) ─────────────────────
-class CalendarConnector(Connector):
-    name = "calendar"
-
-    def needs(self) -> str:
-        return 'CALENDAR_ICS_URLS (JSON object of {"label": "ics url"})'
-
-    @staticmethod
-    def _feeds() -> dict[str, str]:
-        raw = os.environ.get("CALENDAR_ICS_URLS", "")
-        if not raw:
-            return {}
-        try:
-            feeds = json.loads(raw)
-            return {str(k): str(v) for k, v in feeds.items()} if isinstance(feeds, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-
-    def configured(self) -> bool:
-        return bool(self._feeds())
-
-    def tools(self) -> list[dict]:
-        labels = ", ".join(self._feeds().keys())
-        return [
-            {
-                "name": "calendar_upcoming",
-                "description": (
-                    "List upcoming events from the principal's calendars (read only). "
-                    f"Feeds: {labels}. Times are Europe/Zurich. Use for travel screening, "
-                    "the morning brief, and scheduling checks. Note recurring events may "
-                    "only show their next literal date."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "days": {"type": "integer", "description": "Window in days ahead, max 800. Default 7."},
-                        "calendar": {"type": "string", "description": "One feed label to limit to. Default all."},
-                    },
-                },
-            }
-        ]
-
-    @staticmethod
-    def _parse_dt(value: str, params: str) -> datetime | None:
-        value = value.strip()
-        try:
-            if re.fullmatch(r"\d{8}", value):
-                dt = datetime.strptime(value, "%Y%m%d").replace(tzinfo=LOCAL_TZ)
-                return dt
-            if value.endswith("Z"):
-                return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            dt = datetime.strptime(value, "%Y%m%dT%H%M%S")
-            m = re.search(r"TZID=([^;:]+)", params or "")
-            tz = LOCAL_TZ
-            if m:
-                try:
-                    tz = ZoneInfo(m.group(1))
-                except Exception:
-                    tz = LOCAL_TZ
-            return dt.replace(tzinfo=tz)
-        except ValueError:
-            return None
-
-    def _parse_ics(self, text: str) -> list[dict]:
-        # unfold continuation lines
-        text = re.sub(r"\r?\n[ \t]", "", text)
-        events = []
-        for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.S):
-            ev: dict = {}
-            for line in block.splitlines():
-                if ":" not in line:
-                    continue
-                key, val = line.split(":", 1)
-                name, _, params = key.partition(";")
-                name = name.upper()
-                if name == "SUMMARY":
-                    ev["summary"] = val.strip()
-                elif name == "LOCATION" and val.strip():
-                    ev["location"] = val.strip()[:120]
-                elif name == "DTSTART":
-                    ev["start"] = self._parse_dt(val, params)
-                    ev["all_day"] = bool(re.fullmatch(r"\d{8}", val.strip()))
-                elif name == "DTEND":
-                    ev["end"] = self._parse_dt(val, params)
-                elif name == "RRULE":
-                    ev["recurring"] = True
-            if ev.get("start"):
-                events.append(ev)
-        return events
-
-    def run(self, tool_name: str, args: dict) -> str:
-        if tool_name != "calendar_upcoming":
-            return f"Error: unknown calendar tool {tool_name}."
-        days = min(int(args.get("days", 7) or 7), 800)
-        only = args.get("calendar")
-        now = datetime.now(LOCAL_TZ)
-        horizon = now + timedelta(days=days)
-        out = []
-        with httpx.Client(timeout=20, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (Miles EA)"}) as http:
-            for label, url in self._feeds().items():
-                if only and label.lower() != str(only).lower():
-                    continue
-                try:
-                    r = http.get(url)
-                    r.raise_for_status()
-                    for ev in self._parse_ics(r.text):
-                        start = ev["start"]
-                        if not (now - timedelta(days=1) <= start <= horizon):
-                            continue
-                        item = {
-                            "calendar": label,
-                            "summary": ev.get("summary", "(no title)"),
-                            "start": start.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M" if not ev.get("all_day") else "%Y-%m-%d (all day)"),
-                        }
-                        if ev.get("end"):
-                            item["end"] = ev["end"].astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
-                        if ev.get("location"):
-                            item["location"] = ev["location"]
-                        if ev.get("recurring"):
-                            item["recurring"] = True
-                        out.append(item)
-                except Exception as e:  # noqa: BLE001
-                    out.append({"calendar": label, "error": str(e)[:160]})
-        out.sort(key=lambda x: x.get("start", ""))
-        return json.dumps(out[:60], ensure_ascii=False)
 # ───────────────────────── notion (REST, read only) ─────────────────────────
 class NotionConnector(Connector):
     name = "notion"
@@ -1726,7 +1598,14 @@ class GoogleConnector(Connector):
             return f"Error: unknown google tool {tool_name}."
 
 
-CONNECTORS: list[Connector] = [EmailConnector(), CalendarConnector(), NotionConnector(), SlackConnector(), GoogleConnector()]
+# v6.5/v6.6 (2026-07-28 incident): the legacy ICS CalendarConnector is GONE. In
+# production CALENDAR_ICS_URLS held a single stale "Elite Coaching" feed, so the
+# model had a wrong "calendar_upcoming" tool sitting next to the live
+# calendar_upcoming_v2 read, and the Slack EOD post built on it claimed "nothing
+# scheduled" on a back to back day. There is now exactly ONE calendar data path
+# in the whole system: GoogleConnector.calendar_upcoming_v2 (live, all calendars,
+# Sentinel probed). Do not add a second one.
+CONNECTORS: list[Connector] = [EmailConnector(), NotionConnector(), SlackConnector(), GoogleConnector()]
 
 
 def active() -> list[Connector]:
@@ -1768,8 +1647,6 @@ def status_lines() -> list[str]:
             extra = ""
             if c.name == "email":
                 extra = f" ({len(EmailConnector._accounts())} account(s))"
-            if c.name == "calendar":
-                extra = f" ({len(CalendarConnector._feeds())} feed(s))"
             lines.append(f"\U0001f7e2 {c.name}: wired and live (read only){extra}")
         else:
             lines.append(f"⚪ {c.name}: not wired yet (needs {c.needs()})")
