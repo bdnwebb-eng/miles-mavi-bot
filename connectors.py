@@ -253,6 +253,36 @@ class NotionConnector(Connector):
                 },
             },
             {
+                "name": "notion_create_lead",
+                "description": (
+                    "Create a NEW row on the MAVI Engagements Pipeline (Kas's projects "
+                    "board). Use when Kas shares a new lead (text, voice note, or a "
+                    "screenshot e.g. from Smart Alex): extract the details, confirm your "
+                    "one line summary with Kas first, and only create on her yes. Always "
+                    "announce the new project code afterwards. Select fields MUST use "
+                    "existing options: stage one of Qualified Lead / Intro Call Booked / "
+                    "Proposal Sent / Review Deposit Received / Active Engagement / "
+                    "Handover / Post-Handover; urgency one of Now / Soon / This Year / "
+                    "Curious; entry_point one of Cold IG / Referral / Podcast / Press / "
+                    "Conference / Application Form. Never invent details; ask for what "
+                    "is missing."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": {"type": "string", "description": "Title, e.g. MAVI-2026-XX-001 (initials + next number). Required."},
+                        "client_name": {"type": "string", "description": "Client or company name. Required."},
+                        "primary_concern": {"type": "string", "description": "What the lead is about, one to three sentences."},
+                        "stage": {"type": "string", "description": "Pipeline stage. Default 'Qualified Lead'."},
+                        "urgency": {"type": "string", "description": "Now / Soon / This Year / Curious."},
+                        "entry_point": {"type": "string", "description": "Where the lead came from."},
+                        "property_location": {"type": "string", "description": "City, country if known."},
+                        "next_action": {"type": "string", "description": "The very next step."},
+                    },
+                    "required": ["project_code", "client_name"],
+                },
+            },
+            {
                 "name": "notion_update_property",
                 "description": "Update ONE property on a Notion page (e.g. project health, next action, a date). The only write Miles is allowed. Always tell the principal exactly what you changed.",
                 "input_schema": {
@@ -354,6 +384,38 @@ class NotionConnector(Connector):
                         props_out[pname] = self._prop_value(prop)
                     rows.append({"id": pg["id"], "properties": props_out})
                 return json.dumps(rows, ensure_ascii=False)
+            if tool_name == "notion_create_lead":
+                dbid = os.environ.get("NOTION_PROJECTS_DB_ID", "")
+                if not dbid:
+                    return "Error: NOTION_PROJECTS_DB_ID is not configured; cannot create leads."
+                code = str(args.get("project_code", "")).strip()
+                client_name = str(args.get("client_name", "")).strip()
+                if not (code and client_name):
+                    return "Error: need project_code and client_name."
+                props: dict = {
+                    "Project Code": {"title": [{"type": "text", "text": {"content": code[:100]}}]},
+                    "Client Name": {"rich_text": [{"type": "text", "text": {"content": client_name[:200]}}]},
+                    "Stage": {"select": {"name": str(args.get("stage", "") or "Qualified Lead").strip()}},
+                }
+                for arg, pname in (("primary_concern", "Primary Concern"),
+                                   ("property_location", "Property Location"),
+                                   ("next_action", "Next Action")):
+                    val = str(args.get(arg, "") or "").strip()
+                    if val:
+                        props[pname] = {"rich_text": [{"type": "text", "text": {"content": val[:1900]}}]}
+                for arg, pname in (("urgency", "Urgency"), ("entry_point", "Entry Point")):
+                    val = str(args.get(arg, "") or "").strip()
+                    if val:
+                        props[pname] = {"select": {"name": val}}
+                r = http.post(f"{self._API}/pages", headers=self._headers(),
+                              json={"parent": {"database_id": dbid}, "properties": props})
+                if r.status_code >= 400:
+                    return f"Error creating the lead row: {r.text[:400]}"
+                pid = r.json().get("id", "")
+                url = r.json().get("url", "")
+                return (f"Created lead {code} ({client_name}) on the MAVI Engagements "
+                        f"Pipeline (page id {pid}). {url} Tell Kas exactly what you "
+                        "created and read the key fields back to her.")
             if tool_name == "notion_update_property":
                 pid = args.get("page_id", "")
                 pname = args.get("property", "")
@@ -1164,12 +1226,17 @@ class GoogleConnector(Connector):
                             for ev in ej.get("items", []):
                                 start = ev.get("start", {}) or {}
                                 end = ev.get("end", {}) or {}
+                                # v6.7: carry the event notes (description) so briefs
+                                # and the dashboard can explain what a meeting IS.
+                                notes = re.sub(r"<[^>]+>", " ", str(ev.get("description") or ""))
+                                notes = re.sub(r"\s+", " ", notes).strip()[:300]
                                 merged.append({
                                     "id": ev.get("id"),
                                     "summary": ev.get("summary", "(no title)"),
                                     "start": start.get("dateTime") or start.get("date"),
                                     "end": end.get("dateTime") or end.get("date"),
                                     "location": ev.get("location", ""),
+                                    "notes": notes,
                                     "attendees": len(ev.get("attendees", []) or []),
                                     "calendar": cal_name,
                                 })
@@ -1598,6 +1665,59 @@ class GoogleConnector(Connector):
             return f"Error: unknown google tool {tool_name}."
 
 
+# ───────────────────── system (internal tools, always on) ─────────────────────
+class SystemConnector(Connector):
+    """v6.7: internal tools that touch Miles's own state rather than an external
+    service. Always configured. First tool: energy_log, so Kas's 18:30 energy
+    answer (text or voice) lands in the energy table that powers the dashboard
+    sparkline and future pattern insights."""
+
+    name = "system"
+
+    def configured(self) -> bool:
+        return True
+
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "name": "energy_log",
+                "description": (
+                    "Log the principal's energy for today (asked at 18:30 in the EOD "
+                    "brief, but log whenever Kas shares it). Score 1 to 10 plus her "
+                    "note about the day, verbatim-ish. One entry per day (a second "
+                    "call overwrites today's). Thank her briefly after logging; never "
+                    "lecture. Once 14+ days exist you may offer short pattern "
+                    "insights in the morning brief."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "score": {"type": "integer", "description": "1 (empty) to 10 (peak)."},
+                        "note": {"type": "string", "description": "Her words about the day, short."},
+                    },
+                    "required": ["score"],
+                },
+            }
+        ]
+
+    def run(self, tool_name: str, args: dict) -> str:
+        if tool_name != "energy_log":
+            return f"Error: unknown system tool {tool_name}."
+        try:
+            score = max(1, min(int(args.get("score", 0)), 10))
+        except (TypeError, ValueError):
+            return "Error: score must be a number from 1 to 10."
+        note = str(args.get("note", "") or "").strip()[:500]
+        import config_loader as cfg
+        import database as db
+        ids = [int(x) for x in (cfg.settings().get("access", {}).get("allowed_ids") or [])]
+        if not ids:
+            return "Error: no principal configured to log energy for."
+        db.add_energy(ids[0], score, note)
+        return (f"Logged today's energy: {score}/10" + (f" with note '{note[:80]}'" if note else "") +
+                ". Thank Kas briefly; do not lecture.")
+
+
 # v6.5/v6.6 (2026-07-28 incident): the legacy ICS CalendarConnector is GONE. In
 # production CALENDAR_ICS_URLS held a single stale "Elite Coaching" feed, so the
 # model had a wrong "calendar_upcoming" tool sitting next to the live
@@ -1605,7 +1725,7 @@ class GoogleConnector(Connector):
 # scheduled" on a back to back day. There is now exactly ONE calendar data path
 # in the whole system: GoogleConnector.calendar_upcoming_v2 (live, all calendars,
 # Sentinel probed). Do not add a second one.
-CONNECTORS: list[Connector] = [EmailConnector(), NotionConnector(), SlackConnector(), GoogleConnector()]
+CONNECTORS: list[Connector] = [EmailConnector(), NotionConnector(), SlackConnector(), GoogleConnector(), SystemConnector()]
 
 
 def active() -> list[Connector]:

@@ -58,6 +58,8 @@ REQUIRED_SYMBOLS = {
         ("gmail_recent", 1),
         ("gmail_draft", 1),
         ("notion_query_database", 1),
+        ("notion_create_lead", 1),
+        ("energy_log", 1),
         ("docs_create", 1),
         ("sheets_create", 1),
         ('"timezone": {"type": "string"', 1),
@@ -75,18 +77,20 @@ REQUIRED_SYMBOLS = {
                     ("def _c_elevenlabs_stt", 1)],
     "handlers.py": [("def sentinel_cmd", 1), ("def voice_note_handler", 1),
                     ("filters.VOICE", 1)],
-    # v6.6: the scheduled Slack posts MUST stay on the live Google path (the
+    # v6.6: the scheduled briefs MUST stay on the live Google path (the
     # 2026-07-28 EOD said "nothing scheduled" on a back to back day because this
-    # file quietly still used the retired ICS connector).
+    # file quietly still used the retired ICS connector). v6.7: delivery is
+    # Telegram only; Slack is read, never posted to, from this file.
     "slack_rhythm.py": [("calendar_upcoming_v2", 1), ("GoogleConnector", 1),
                         ("UNAVAILABLE", 3), ("gmail_recent", 1),
-                        ("def _alert_operator", 1)],
+                        ("def _alert_operator", 1), ("def _send_telegram", 1),
+                        ("def _slack_section", 1)],
 }
 
 # Symbols that must NOT appear anywhere in a file: a reappearing forbidden symbol
-# means a stale copy of the file (pre v6.6) is about to ship. file -> [needle].
+# means a stale copy of the file (pre v6.6/v6.7) is about to ship. file -> [needle].
 FORBIDDEN_SYMBOLS = {
-    "slack_rhythm.py": ["CalendarConnector", "calendar_upcoming\""],
+    "slack_rhythm.py": ["CalendarConnector", "calendar_upcoming\"", "slack_post_message"],
     "web_api.py": ["CalendarConnector", "calendar_upcoming\""],
     "connectors.py": ["class CalendarConnector"],
 }

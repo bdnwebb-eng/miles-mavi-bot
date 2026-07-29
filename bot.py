@@ -106,15 +106,16 @@ def main() -> None:
             app.job_queue.run_repeating(send_daily_reminders, interval=60, first=10)
             tz = ZoneInfo(cfg.settings()["bot"]["timezone"])
             app.job_queue.run_daily(send_cold_flags, time=time(hour=7, minute=35, tzinfo=tz))
-            # Slack rhythm (Jul 10 meeting): Miles takes over India's internal posts.
-            # Both jobs self-gate on SLACK_BOT_TOKEN + SLACK_AGENDA_CHANNEL.
+            # Daily rhythm (v6.7): morning agenda + EOD summary w/ energy question,
+            # delivered on TELEGRAM only (Kas's decision, Jul 28). Slack is read
+            # for context but never posted to on a schedule.
             app.job_queue.run_daily(slack_rhythm.morning_agenda, time=time(hour=7, minute=40, tzinfo=tz))
             app.job_queue.run_daily(slack_rhythm.eod_summary, time=time(hour=18, minute=30, tzinfo=tz))
             # Sentinel watchdog: every 30 minutes, compare live health to last state
             # and alert Brandon on new/persisting RED or recovery. First run at +2 min.
             app.job_queue.run_repeating(sentinel_watchdog, interval=1800, first=120)
             log.info(
-                "Reminder scheduler active (cold scan 07:35, Slack agenda 07:40, EOD 18:30 %s). Slack rhythm %s.",
+                "Reminder scheduler active (cold scan 07:35, Telegram morning brief 07:40, Telegram EOD + energy 18:30 %s). Rhythm %s.",
                 tz, "armed" if slack_rhythm.enabled() else "dormant (env not set)",
             )
         else:

@@ -74,7 +74,17 @@ def cold_items(limit: int = 5) -> list[dict]:
         r = http.post(f"{_API}/databases/{dbid}/query", headers=_headers(), json={"page_size": 100})
         r.raise_for_status()
         now = datetime.now(timezone.utc)
+        live_prop = os.environ.get("NOTION_LIVE_PROP", "Live Now")
         for page in r.json().get("results", []):
+            # v6.7 (Kas): a LIVE project is never cold. Live engagements move in
+            # email, on site, and in meetings; board edit dates do not measure them.
+            props = page.get("properties") or {}
+            lp = props.get(live_prop) or {}
+            if lp.get("type") == "checkbox" and lp.get("checkbox") is True:
+                continue
+            stage = (props.get("Stage") or {}).get("select") or {}
+            if str(stage.get("name", "")).strip() == "Active Engagement":
+                continue
             ts = _row_activity(page)
             if ts is None:
                 continue

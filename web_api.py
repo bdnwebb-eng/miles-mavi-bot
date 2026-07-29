@@ -41,8 +41,8 @@ log = logging.getLogger("hermes.web_api")
 
 LOOP_SCHEDULE = {
     "cold_scan": "daily 07:35 Geneva",
-    "slack_agenda": "daily 07:40 #agenda",
-    "slack_eod": "daily 18:30 #agenda",
+    "morning_brief": "daily 07:40 Geneva, Telegram",
+    "eod_brief_and_energy": "daily 18:30 Geneva, Telegram",
     "whatsapp_digest": "daily 06:45",
 }
 
@@ -95,10 +95,15 @@ def _projects() -> list:
             except (ValueError, AttributeError):
                 days_stale = None
             live = bool(flat.get("Live Now"))
+            stage = flat.get("Stage") or ""
+            # v6.7 (Kas): live projects and active engagements are NEVER cold.
+            # Cold only means a non-live pipeline row nobody has touched.
+            is_cold = bool(days_stale is not None and days_stale > 7
+                           and not live and stage != "Active Engagement")
             out.append({
                 "client": flat.get("Client Name") or nc._title_of(pg),
                 "code": flat.get("Project Code") or "",
-                "stage": flat.get("Stage") or "",
+                "stage": stage,
                 "tier": flat.get("Lead Tier") or "",
                 "urgency": flat.get("Urgency") or "",
                 "location": flat.get("Property Location") or "",
@@ -106,7 +111,7 @@ def _projects() -> list:
                 "next_action": flat.get("Next Action") or "",
                 "live": live,
                 "days_stale": days_stale,
-                "cold": bool(days_stale is not None and days_stale > 7),
+                "cold": is_cold,
             })
     tier_rank = {"NOW": 0, "SOON": 1, "LATER": 2}
 
@@ -121,13 +126,24 @@ def _projects() -> list:
     return out
 
 
+def _dash_calendars() -> list[str]:
+    """v6.7 (Kas): the dashboard week projection shows ONLY the calendars she
+    cares about: her kas@maviliving.com calendar and her Outlook.KasBordier
+    import. Oliver, Olga, Kas & Ev, and Holidays in Switzerland are excluded
+    from the DASHBOARD view only; Miles himself still reads every calendar."""
+    raw = os.environ.get("DASHBOARD_CAL_WHITELIST", "kas@maviliving.com,Outlook.KasBordier")
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
 def _calendar(days: int = 7) -> dict:
     """Upcoming events from the ONE calendar data path in the system:
     GoogleConnector.calendar_upcoming_v2 (live, every calendar, Sentinel probed).
     v6.6: the silent ICS fallback is gone. If Google is not connected the payload
     says complete=false with an explicit error, so the dashboard shows "not live"
     instead of a confidently empty calendar (the 2026-07-28 failure class).
-    Titles and times only. Returns {"events": [...], "meta": {window, complete, count}}."""
+    v6.7: events are filtered to the dashboard calendar whitelist (Kas's own
+    calendars only) and carry the event notes.
+    Returns {"events": [...], "meta": {window, complete, count, calendars}}."""
     gc = connectors.GoogleConnector()
     if not gc.configured():
         return {"events": [], "meta": {"window": None, "complete": False,
@@ -149,13 +165,49 @@ def _calendar(days: int = 7) -> dict:
     else:
         items = data if isinstance(data, list) else []
         meta = {"window": None, "complete": True, "count": len(items)}
+    allow = _dash_calendars()
     events = [
         {"summary": e.get("summary", ""), "start": e.get("start", ""),
          "end": e.get("end", ""), "location": e.get("location", ""),
-         "calendar": e.get("calendar", "")}
-        for e in items
+         "notes": e.get("notes", ""), "calendar": e.get("calendar", "")}
+        for e in items if e.get("calendar", "") in allow
     ]
+    meta["calendars"] = allow
+    meta["count"] = len(events)
     return {"events": events, "meta": meta}
+
+
+_TRAVEL_RE = None
+
+
+def _travel(days: int = 60) -> list:
+    """v6.7 (Kas): the travel strip shows real upcoming travel pulled LIVE from
+    her calendars (all of them, travel is often on the Travel / imported
+    calendars): events whose title or notes look like travel. The iCloud travel
+    calendar joins this automatically once it is shared into her Google."""
+    import re as _re
+    global _TRAVEL_RE
+    if _TRAVEL_RE is None:
+        _TRAVEL_RE = _re.compile(
+            r"flight|fly to|✈|airport|travel|trip\b|hotel|check.?in|depart|"
+            r"arrival|airbnb|train to", _re.I)
+    gc = connectors.GoogleConnector()
+    if not gc.configured():
+        return []
+    raw = gc.run("calendar_upcoming_v2", {"days": days})
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    items = data.get("events", []) if isinstance(data, dict) else []
+    out = []
+    for e in items:
+        hay = f"{e.get('summary','')} {e.get('notes','')} {e.get('calendar','')}"
+        if _TRAVEL_RE.search(hay):
+            out.append({"summary": e.get("summary", ""), "start": e.get("start", ""),
+                        "end": e.get("end", ""), "location": e.get("location", ""),
+                        "calendar": e.get("calendar", "")})
+    return out[:10]
 
 
 def _inbox():
@@ -249,6 +301,7 @@ def build_payload(days: int = 7) -> dict:
             return default
 
     projects = _safe("projects", _projects, [])
+    travel = _safe("travel", _travel, [])
     cal = _safe("calendar", lambda: _calendar(days), {"events": [], "meta": {}})
     if not isinstance(cal, dict):
         cal = {"events": cal or [], "meta": {}}
@@ -288,6 +341,7 @@ def build_payload(days: int = 7) -> dict:
         "projects": projects,
         "calendar": calendar,
         "calendar_meta": calendar_meta,
+        "travel": travel,
         "inbox_unread": inbox_unread,
         "energy": energy,
         "senses": senses,
