@@ -48,8 +48,7 @@ REQUIRED_SYMBOLS = {
                     ("def set_sentinel_state", 1),
                     ("def get_sentinel_state", 1),
                     ("def log_action", 1),
-                    ("def recent_actions", 1),
-                    ("def add_map_note", 1)],
+                    ("def recent_actions", 1)],
     "connectors.py": [
         ("class GoogleConnector", 1),
         ("def active_tools", 1),
@@ -67,7 +66,7 @@ REQUIRED_SYMBOLS = {
     ],
     "web_api.py": [("ThreadingHTTPServer", 1), ("def start", 1),
                    ("Dashboard API", 1), ("/api/health", 1),
-                   ("/api/notes", 2), ("def do_POST", 1)],
+                   ("def _stage_is_live", 1), ("proposals_pipeline", 1)],
     "ai.py": [("CURRENT DATE AND TIME", 1), ("def _enforce_link_integrity", 1),
               ("HARD ANTI FABRICATION RULES", 1),
               ("def _enforce_action_integrity", 1),

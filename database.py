@@ -342,46 +342,6 @@ def energy_history(tid: int, days: int = 30) -> list:
     return list(reversed(rows))
 
 
-# ───────────────────────── back end map notes (Jul 30: shared, server side) ─────────────────────────
-# Kas and Brandon both write notes on the back end map (/backend on the dashboard).
-# They must be SHARED, not per device: a note Kas saves on her laptop has to show
-# up for Brandon. So they live here, in the one sqlite DB on the Railway volume,
-# served read/write by web_api (/api/notes). section is the map section id (s1..s5).
-def _ensure_map_notes() -> None:
-    with _conn() as c:
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS map_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "section TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
-
-
-def add_map_note(section: str, text: str, created_at: str) -> int:
-    """Append one note to a map section. Returns the new note id."""
-    _ensure_map_notes()
-    with _conn() as c:
-        cur = c.execute(
-            "INSERT INTO map_notes (section, text, created_at) VALUES (?,?,?)",
-            (section, text, created_at),
-        )
-    return int(cur.lastrowid or 0)
-
-
-def delete_map_note(note_id: int) -> bool:
-    _ensure_map_notes()
-    with _conn() as c:
-        cur = c.execute("DELETE FROM map_notes WHERE id=?", (note_id,))
-    return cur.rowcount > 0
-
-
-def map_notes() -> list[sqlite3.Row]:
-    """Every saved note, newest first, across all sections."""
-    _ensure_map_notes()
-    with _conn() as c:
-        return c.execute(
-            "SELECT id, section, text, created_at FROM map_notes ORDER BY id DESC"
-        ).fetchall()
-
-
 # ───────────────────────── google oauth (refresh token on the Railway volume) ─────────────────────────
 # Miles serves exactly one principal (Kas), so Google is a single shared identity.
 # The shared refresh token lives in one sentinel row keyed tid=0; any allowed user
@@ -497,3 +457,37 @@ def get_sentinel_state(key: str, default: str | None = None) -> str | None:
     with _conn() as c:
         row = c.execute("SELECT value FROM sentinel_state WHERE key=?", (key,)).fetchone()
     return row[0] if row else default
+
+
+# ───────────────────────── dashboard notes (Kas flags things for Brandon) ─────────────────────────
+# v8: every dashboard section carries a small Add note affordance. Notes land here
+# (on the Railway volume via HERMES_DB_PATH, so they survive redeploys), surface in
+# the /api/status payload under "notes", and fire an operator alert to Brandon.
+def _ensure_dashboard_notes() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS dashboard_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts_utc TEXT, section TEXT, text TEXT)"
+        )
+
+
+def add_note(section: str, text: str) -> int:
+    """Store one dashboard note. Caps section and text length. Returns the row id."""
+    _ensure_dashboard_notes()
+    section = (section or "General").strip()[:120]
+    text = (text or "").strip()[:2000]
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO dashboard_notes (ts_utc, section, text) VALUES (?,?,?)",
+            (datetime.utcnow().isoformat(), section, text),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def recent_notes(limit: int = 50) -> list[sqlite3.Row]:
+    """Most recent dashboard notes, newest first."""
+    _ensure_dashboard_notes()
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM dashboard_notes ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
