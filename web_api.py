@@ -4,11 +4,14 @@ Runs a tiny stdlib http.server in a DAEMON THREAD alongside the python-telegram-
 polling loop. No new pip dependencies, no entanglement with the PTB asyncio loop:
 the connector layer uses synchronous httpx, which is perfectly happy in a thread.
 
-Single data route:
-    GET /api/status?key=<DASHBOARD_API_KEY>
+Data routes:
+    GET  /api/status?key=<DASHBOARD_API_KEY>
     (GET /api/dashboard is kept as a backward-compatible alias.)
+    POST /api/note?key=<DASHBOARD_API_KEY>   {"section": "...", "text": "..."}
+    (the ONE write route: Kas leaves a note under a dashboard section; it lands in
+    sqlite on the volume, shows in the payload under "notes", and alerts Brandon.)
 
-Everything is READ ONLY and CLIENT-SAFE. The payload carries aggregates plus
+Everything else is READ ONLY and CLIENT-SAFE. The payload carries aggregates plus
 project titles / stages only. It NEVER includes email bodies, message contents,
 subjects, or any pricing. CORS is wide open (Access-Control-Allow-Origin: *) so
 the Netlify dashboard can fetch it from the browser.
@@ -126,6 +129,26 @@ def _projects() -> list:
     return out
 
 
+# v8 (Kas): the project board shows ACTIVE work only. Known pipeline stages are
+# Qualified Lead / Intro Call Booked / Proposal Sent / Review Deposit Received /
+# Active Engagement / Handover / Post-Handover. Post-Handover is delivered work,
+# so it leaves the board; the word check also catches any done, completed,
+# archived, parked or on hold style stage added to Notion later. The filter is
+# applied in build_payload so the KPI counts always agree with the board.
+_INACTIVE_STAGE_EXACT = {"post-handover", "post handover"}
+_INACTIVE_STAGE_WORDS = ("complete", "done", "archiv", "closed", "lost",
+                         "park", "hold", "dorman", "cancel", "inactive")
+
+
+def _stage_is_active(stage) -> bool:
+    s = str(stage or "").strip().lower()
+    if not s:
+        return True
+    if s in _INACTIVE_STAGE_EXACT:
+        return False
+    return not any(w in s for w in _INACTIVE_STAGE_WORDS)
+
+
 def _dash_calendars() -> list[str]:
     """v6.7 (Kas): the dashboard week projection shows ONLY the calendars she
     cares about: her kas@maviliving.com calendar and her Outlook.KasBordier
@@ -229,14 +252,17 @@ def _inbox():
 
 
 def _senses() -> dict:
-    """Connector -> status string. 'live' / 'pending'. v6.6: calendar truth comes
-    only from the Google token (the ICS 'partial' state is gone with the ICS path)."""
+    """Connector -> status string. 'live' / 'pending' / 'operator'. v6.6: calendar
+    truth comes only from the Google token (the ICS 'partial' state is gone with
+    the ICS path). v8 honesty: WhatsApp is NOT wired into this worker. The daily
+    digest runs through the operator's own session outside the bot, so it must
+    never report live; the dashboard renders 'operator' as Not connected."""
     has_google_token = bool(db.get_google_token())
     email_imap = connectors.EmailConnector().configured()
     return {
         "notion": "live" if connectors.NotionConnector().configured() else "pending",
         "slack": "live" if connectors.SlackConnector().configured() else "pending",
-        "whatsapp": "live",
+        "whatsapp": "operator",
         "calendar": "live" if has_google_token else "pending",
         "email": "live" if (has_google_token or email_imap) else "pending",
         "google": "live" if has_google_token else "pending",
@@ -301,6 +327,8 @@ def build_payload(days: int = 7) -> dict:
             return default
 
     projects = _safe("projects", _projects, [])
+    # Active work only; KPI counts below run on the same filtered list.
+    projects = [p for p in projects if _stage_is_active(p.get("stage"))]
     travel = _safe("travel", _travel, [])
     cal = _safe("calendar", lambda: _calendar(days), {"events": [], "meta": {}})
     if not isinstance(cal, dict):
@@ -310,6 +338,11 @@ def build_payload(days: int = 7) -> dict:
     inbox_unread = _safe("inbox_unread", _inbox, None)
     energy_days = _safe("energy", _principal_energy, [])
     senses = _safe("senses", _senses, {})
+    notes = _safe("notes", lambda: [
+        {"id": r["id"], "ts_utc": r["ts_utc"], "section": r["section"],
+         "text": r["text"]}
+        for r in db.recent_notes(50)
+    ], [])
 
     _scores = [d["score"] for d in (energy_days or [])
                if isinstance(d.get("score"), (int, float))]
@@ -345,6 +378,7 @@ def build_payload(days: int = 7) -> dict:
         "inbox_unread": inbox_unread,
         "energy": energy,
         "senses": senses,
+        "notes": notes,
         "loops": dict(LOOP_SCHEDULE),
         "errors": errors,
     }
@@ -355,7 +389,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
 
     def _send(self, code, body, ctype="application/json"):
@@ -440,6 +474,67 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         self._send(404, json.dumps({"error": "not found"}).encode())
+
+    def do_POST(self):  # noqa: N802
+        parsed = urlparse(self.path)
+        route = parsed.path.rstrip("/") or "/"
+        if route != "/api/note":
+            self._send(404, json.dumps({"error": "not found"}).encode())
+            return
+        expected = os.environ.get("DASHBOARD_API_KEY")
+        if not expected:
+            self._send(503, json.dumps({"error": "not configured"}).encode())
+            return
+        qs = parse_qs(parsed.query)
+        key = (qs.get("key") or [""])[0]
+        if key != expected:
+            self._send(401, json.dumps({"error": "unauthorized"}).encode())
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 8192:
+            self._send(400, json.dumps({"error": "bad body size"}).encode())
+            return
+        try:
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            self._send(400, json.dumps({"error": "invalid json"}).encode())
+            return
+        if not isinstance(data, dict):
+            self._send(400, json.dumps({"error": "invalid body"}).encode())
+            return
+        section = str(data.get("section") or "").strip()[:120]
+        text = str(data.get("text") or "").strip()
+        if not text:
+            self._send(400, json.dumps({"error": "empty note"}).encode())
+            return
+        if len(text) > 2000:
+            self._send(400, json.dumps({"error": "note too long"}).encode())
+            return
+        try:
+            note_id = db.add_note(section or "General", text)
+        except Exception as e:  # noqa: BLE001
+            log.exception("note save failed")
+            self._send(500, json.dumps({"error": "internal", "detail": str(e)[:200]}).encode())
+            return
+        # Drop the warm cache so the notes log reflects the new note on the
+        # next dashboard load (the refresher also rebuilds within 2 minutes).
+        with _CACHE_LOCK:
+            _STATUS_CACHE["payload"] = None
+            _STATUS_CACHE["built_at"] = 0.0
+        # Operator alert to Brandon through the Sentinel raw Bot API helper
+        # (reused, not duplicated). Best effort: the note is saved either way.
+        try:
+            import sentinel
+            preview = text if len(text) <= 700 else text[:700] + "..."
+            sentinel.send_ops_alert(
+                f"Kas left a dashboard note on {section or 'General'}: {preview}")
+        except Exception as e:  # noqa: BLE001
+            log.warning("note ops alert failed: %s", e)
+        self._send(200, json.dumps({"ok": True, "id": note_id}).encode())
+        return
 
     def log_message(self, fmt, *args):
         log.debug("web_api %s", fmt % args)

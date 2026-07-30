@@ -457,3 +457,37 @@ def get_sentinel_state(key: str, default: str | None = None) -> str | None:
     with _conn() as c:
         row = c.execute("SELECT value FROM sentinel_state WHERE key=?", (key,)).fetchone()
     return row[0] if row else default
+
+
+# ───────────────────────── dashboard notes (Kas flags things for Brandon) ─────────────────────────
+# v8: every dashboard section carries a small Add note affordance. Notes land here
+# (on the Railway volume via HERMES_DB_PATH, so they survive redeploys), surface in
+# the /api/status payload under "notes", and fire an operator alert to Brandon.
+def _ensure_dashboard_notes() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS dashboard_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts_utc TEXT, section TEXT, text TEXT)"
+        )
+
+
+def add_note(section: str, text: str) -> int:
+    """Store one dashboard note. Caps section and text length. Returns the row id."""
+    _ensure_dashboard_notes()
+    section = (section or "General").strip()[:120]
+    text = (text or "").strip()[:2000]
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO dashboard_notes (ts_utc, section, text) VALUES (?,?,?)",
+            (datetime.utcnow().isoformat(), section, text),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def recent_notes(limit: int = 50) -> list[sqlite3.Row]:
+    """Most recent dashboard notes, newest first."""
+    _ensure_dashboard_notes()
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM dashboard_notes ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
