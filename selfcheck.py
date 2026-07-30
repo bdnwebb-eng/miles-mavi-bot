@@ -66,7 +66,8 @@ REQUIRED_SYMBOLS = {
     ],
     "web_api.py": [("ThreadingHTTPServer", 1), ("def start", 1),
                    ("Dashboard API", 1), ("/api/health", 1),
-                   ("def _stage_is_live", 1), ("proposals_pipeline", 1)],
+                   ("def _stage_is_live", 1), ("proposals_pipeline", 1),
+                   ('"pipeline": pipeline', 1)],
     "ai.py": [("CURRENT DATE AND TIME", 1), ("def _enforce_link_integrity", 1),
               ("HARD ANTI FABRICATION RULES", 1),
               ("def _enforce_action_integrity", 1),
@@ -92,7 +93,7 @@ REQUIRED_SYMBOLS = {
 # means a stale copy of the file (pre v6.6/v6.7) is about to ship. file -> [needle].
 FORBIDDEN_SYMBOLS = {
     "slack_rhythm.py": ["CalendarConnector", "calendar_upcoming\"", "slack_post_message"],
-    "web_api.py": ["CalendarConnector", "calendar_upcoming\""],
+    "web_api.py": ["CalendarConnector", "calendar_upcoming\"", "whatsapp_digest"],
     "connectors.py": ["class CalendarConnector"],
 }
 

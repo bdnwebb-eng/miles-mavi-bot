@@ -46,7 +46,6 @@ LOOP_SCHEDULE = {
     "cold_scan": "daily 07:35 Geneva",
     "morning_brief": "daily 07:40 Geneva, Telegram",
     "eod_brief_and_energy": "daily 18:30 Geneva, Telegram",
-    "whatsapp_digest": "daily 06:45",
 }
 
 
@@ -272,7 +271,7 @@ def _senses() -> dict:
     return {
         "notion": "live" if connectors.NotionConnector().configured() else "pending",
         "slack": "live" if connectors.SlackConnector().configured() else "pending",
-        "whatsapp": "operator",
+        "whatsapp": "off",
         "calendar": "live" if has_google_token else "pending",
         "email": "live" if (has_google_token or email_imap) else "pending",
         "google": "live" if has_google_token else "pending",
@@ -351,7 +350,8 @@ def build_payload(days: int = 7) -> dict:
         "intro_booked": sum(1 for p in projects if _stg(p) == "intro call booked"),
         "proposal_out": sum(1 for p in projects if _stg(p) == "proposal sent"),
     }
-    proposals_pipeline = sum(1 for p in projects if not _stage_is_live(p.get("stage")))
+    pipeline = [p for p in projects if not _stage_is_live(p.get("stage"))]
+    proposals_pipeline = len(pipeline)
     projects = [p for p in projects if _stage_is_live(p.get("stage"))]
     travel = _safe("travel", _travel, [])
     cal = _safe("calendar", lambda: _calendar(days), {"events": [], "meta": {}})
@@ -398,6 +398,7 @@ def build_payload(days: int = 7) -> dict:
         "kpis": kpis,
         "projects": projects,
         "funnel": funnel,
+        "pipeline": pipeline,
         "calendar": calendar,
         "calendar_meta": calendar_meta,
         "travel": travel,
