@@ -496,19 +496,25 @@ def _c_config() -> dict:
     label = "Config files"
     import config_loader as cfg
     persona = cfg.persona()
-    knowledge = cfg.knowledge_text()
     settings = cfg.settings()
     examples = cfg.examples()  # must not raise
     _ = examples
-    if persona and settings and knowledge:
+    soul = cfg.soul()
+    sources = cfg.sources()
+    kindex = cfg.knowledge_index()
+    if persona and settings and soul and sources and kindex:
         return _check("config", label, GREEN,
-                      "persona, knowledge, examples and settings all load and are non empty.",
+                      "SOUL, SOURCES, knowledge INDEX, persona stub, examples and settings all load and are non empty.",
                       "", IMPORTANT)
     empties = []
     if not persona:
         empties.append("persona")
-    if not knowledge:
-        empties.append("knowledge_text")
+    if not soul:
+        empties.append("SOUL.md")
+    if not sources:
+        empties.append("SOURCES.md")
+    if not kindex:
+        empties.append("knowledge/INDEX.md")
     if not settings:
         empties.append("settings")
     return _check("config", label, AMBER, f"empty config: {', '.join(empties)}.",

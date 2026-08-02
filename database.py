@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from datetime import datetime, date
 
@@ -20,6 +21,18 @@ def _conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     with _conn() as c:
+        # v7 transplant (2026-08-02): clean-head migration, one time. The old raw
+        # memories move aside to an archive table (nothing destroyed); the fresh
+        # memories table plus the curated tier get created below.
+        try:
+            has_old = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
+            has_arch = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='memories_archive_v6'").fetchone()
+            if has_old and not has_arch:
+                n = c.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                c.execute("ALTER TABLE memories RENAME TO memories_archive_v6")
+                print(f"[db] transplant: archived {n} old memories to memories_archive_v6; clean head from here", flush=True)
+        except sqlite3.Error as e:
+            print(f"[db] transplant migration skipped: {e}", flush=True)
         c.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -52,12 +65,30 @@ def init_db() -> None:
                 created_at  TEXT
             );
             CREATE TABLE IF NOT EXISTS memories (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id  INTEGER,
+                category     TEXT DEFAULT 'fact',
+                content      TEXT,
+                source       TEXT DEFAULT 'auto',
+                created_at   TEXT,
+                consolidated INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS memories_curated (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER,
                 category    TEXT DEFAULT 'fact',
                 content     TEXT,
-                source      TEXT DEFAULT 'auto',
-                created_at  TEXT
+                superseded  INTEGER DEFAULT 0,
+                created_at  TEXT,
+                updated_at  TEXT
+            );
+            CREATE TABLE IF NOT EXISTS consolidation_log (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ran_at   TEXT,
+                raw_seen INTEGER,
+                kept     INTEGER,
+                superseded INTEGER,
+                dropped  INTEGER,
+                note     TEXT
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -491,3 +522,105 @@ def recent_notes(limit: int = 50) -> list[sqlite3.Row]:
         return c.execute(
             "SELECT * FROM dashboard_notes ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
+
+
+# ---------- curated memory + recall (v7 transplant) ----------
+
+def curated_for_prompt(char_cap: int = 6000) -> list[sqlite3.Row]:
+    """Live curated tier, oldest first, trimmed to the char cap (newest win)."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM memories_curated WHERE superseded=0 ORDER BY id DESC"
+        ).fetchall()
+    out, total = [], 0
+    for r in rows:
+        ln = len(r["content"] or "")
+        if total + ln > char_cap:
+            break
+        out.append(r)
+        total += ln
+    return list(reversed(out))
+
+
+def curated_all() -> list[sqlite3.Row]:
+    with _conn() as c:
+        return c.execute("SELECT * FROM memories_curated WHERE superseded=0 ORDER BY id").fetchall()
+
+
+def add_curated(category: str, content: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO memories_curated (category, content, created_at, updated_at) VALUES (?,?,?,?)",
+            (category, content, _now(), _now()),
+        )
+
+
+def supersede_curated(ids: list[int]) -> int:
+    if not ids:
+        return 0
+    with _conn() as c:
+        q = ",".join("?" for _ in ids)
+        cur = c.execute(f"UPDATE memories_curated SET superseded=1, updated_at=? WHERE id IN ({q})", (_now(), *ids))
+        return cur.rowcount
+
+
+def enforce_curated_cap(char_cap: int = 6000) -> int:
+    """Machine-enforced v1.3 cap: oldest entries beyond the cap get superseded."""
+    with _conn() as c:
+        rows = c.execute("SELECT id, LENGTH(content) AS ln FROM memories_curated WHERE superseded=0 ORDER BY id DESC").fetchall()
+        total, cut = 0, []
+        for r in rows:
+            total += r["ln"] or 0
+            if total > char_cap:
+                cut.append(r["id"])
+        if cut:
+            q = ",".join("?" for _ in cut)
+            c.execute(f"UPDATE memories_curated SET superseded=1, updated_at=? WHERE id IN ({q})", (_now(), *cut))
+        return len(cut)
+
+
+def unconsolidated_memories() -> list[sqlite3.Row]:
+    with _conn() as c:
+        return c.execute("SELECT * FROM memories WHERE consolidated=0 ORDER BY id LIMIT 120").fetchall()
+
+
+def archive_consolidated(ids: list[int]) -> None:
+    if not ids:
+        return
+    with _conn() as c:
+        q = ",".join("?" for _ in ids)
+        c.execute(f"UPDATE memories SET consolidated=1 WHERE id IN ({q})", ids)
+
+
+def log_consolidation(summary: dict, note: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO consolidation_log (ran_at, raw_seen, kept, superseded, dropped, note) VALUES (?,?,?,?,?,?)",
+            (_now(), summary.get("raw_seen", 0), summary.get("kept", 0),
+             summary.get("superseded", 0), summary.get("dropped", 0), note[:1500]),
+        )
+
+
+def search_history(query: str, limit: int = 8) -> list[dict]:
+    """Recall over the message log and every memory tier (raw, archive, curated).
+    Simple term match, recency weighted (newest first). Returns dicts with
+    source, when, and text."""
+    terms = [t for t in re.split(r"[^\w]+", (query or "").lower()) if len(t) >= 3][:6]
+    if not terms:
+        return []
+    like = " AND ".join("LOWER(content) LIKE ?" for _ in terms)
+    args = tuple(f"%{t}%" for t in terms)
+    out: list[dict] = []
+    with _conn() as c:
+        def _grab(sql: str, source: str, a=args):
+            try:
+                for r in c.execute(sql, a).fetchall():
+                    out.append({"source": source, "when": r["created_at"], "text": r["content"]})
+            except sqlite3.Error:
+                pass
+        _grab(f"SELECT content, created_at FROM messages WHERE {like} ORDER BY id DESC LIMIT {int(limit)}", "conversation")
+        _grab(f"SELECT content, created_at FROM memories WHERE {like} ORDER BY id DESC LIMIT {int(limit)}", "memory")
+        _grab(f"SELECT content, created_at FROM memories_archive_v6 WHERE {like} ORDER BY id DESC LIMIT {int(limit)}", "memory-archive")
+        _grab(f"SELECT content, created_at AS created_at FROM memories_curated WHERE {like} ORDER BY id DESC LIMIT {int(limit)}", "curated")
+    out.sort(key=lambda r: str(r.get("when") or ""), reverse=True)
+    return out[: int(limit) * 2]

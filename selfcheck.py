@@ -44,13 +44,19 @@ def _fail(msg: str) -> "None":
 
 # Critical symbols that MUST survive in each file. file -> list of (needle, min_count).
 REQUIRED_SYMBOLS = {
-    "database.py": [("def get_google_token", 1),
+    "database.py": [("def curated_for_prompt", 1),
+                    ("def search_history", 1),
+                    ("def enforce_curated_cap", 1),
+                    ("memories_archive_v6", 2),
+                    ("def get_google_token", 1),
                     ("def set_sentinel_state", 1),
                     ("def get_sentinel_state", 1),
                     ("def log_action", 1),
                     ("def recent_actions", 1)],
     "connectors.py": [
         ("class GoogleConnector", 1),
+        ("read_knowledge", 2),
+        ("search_history", 2),
         ("def active_tools", 1),
         ("def run", 1),
         ("calendar_upcoming_v2", 1),
@@ -72,7 +78,13 @@ REQUIRED_SYMBOLS = {
               ("HARD ANTI FABRICATION RULES", 1),
               ("def _enforce_action_integrity", 1),
               ("def _log_write_action", 1),
-              ("VERIFIED ACTION LEDGER", 3)],
+              ("VERIFIED ACTION LEDGER", 3),
+              ("cfg.soul()", 1), ("cfg.sources()", 1),
+              ("cfg.knowledge_index()", 1), ("curated_for_prompt", 1)],
+    "config_loader.py": [("def soul", 1), ("def sources", 1),
+                         ("def knowledge_index", 1), ("def read_knowledge_topic", 1)],
+    "consolidate.py": [("def distill", 1), ("def nightly", 1),
+                       ("CURATED_CHAR_CAP", 1), ("directives", 3)],
     "bot.py": [("def main", 1), ("boot_selftest", 1), ("sentinel_watchdog", 1)],
     "sentinel.py": [("def run_diagnostics", 1), ("def run_watchdog", 1),
                     ("def boot_selftest", 1), ("def send_ops_alert", 1),
@@ -95,7 +107,33 @@ FORBIDDEN_SYMBOLS = {
     "slack_rhythm.py": ["CalendarConnector", "calendar_upcoming\"", "slack_post_message"],
     "web_api.py": ["CalendarConnector", "calendar_upcoming\"", "whatsapp_digest"],
     "connectors.py": ["class CalendarConnector"],
+    # v7 transplant: the old stuffed head can never ship again. ai.py must not
+    # read the retired persona blob or the retired knowledge corpus.
+    "ai.py": ["cfg.persona()", "cfg.knowledge_text()", "cfg.flat_lessons()"],
 }
+
+# v7 transplant: the markdown mind must exist and be non empty, or no deploy.
+REQUIRED_MIND_FILES = [
+    os.path.join("config", "SOUL.md"),
+    os.path.join("config", "SOURCES.md"),
+    os.path.join("config", "CHANGELOG.md"),
+    os.path.join("config", "knowledge", "INDEX.md"),
+    os.path.join("config", "knowledge", "pricing-tiers.md"),
+    os.path.join("config", "knowledge", "people-and-walls.md"),
+]
+
+
+def pass_mind_files() -> None:
+    for rel in REQUIRED_MIND_FILES:
+        path = os.path.join(HERE, rel)
+        if not os.path.exists(path):
+            _fail(f"mind file missing: {rel}")
+        if os.path.getsize(path) < 80:
+            _fail(f"mind file suspiciously small (truncated?): {rel}")
+    soul = open(os.path.join(HERE, "config", "SOUL.md"), encoding="utf-8").read()
+    if len(soul.split()) > 460:
+        _fail(f"SOUL.md is over the 400 word cap ({len(soul.split())} words). Trim it; depth belongs in knowledge/.")
+    print(f"[selfcheck] mind files OK ({len(REQUIRED_MIND_FILES)} present, SOUL within cap).")
 
 
 def pass_ast() -> None:
@@ -200,6 +238,7 @@ def main() -> None:
     pass_ast()
     pass_compile()
     pass_symbols()
+    pass_mind_files()
     pass_yaml()
     pass_settings()
     pass_imports()

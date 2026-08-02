@@ -12,6 +12,7 @@ from telegram.ext import Application, ContextTypes
 import ai
 import config_loader as cfg
 import database as db
+import consolidate
 import handlers
 import notion_watch
 import sentinel
@@ -111,6 +112,8 @@ def main() -> None:
             # for context but never posted to on a schedule.
             app.job_queue.run_daily(slack_rhythm.morning_agenda, time=time(hour=7, minute=40, tzinfo=tz))
             app.job_queue.run_daily(slack_rhythm.eod_summary, time=time(hour=18, minute=30, tzinfo=tz))
+            # v7 transplant: nightly memory distiller (taxonomy + cap + operator diff DM)
+            app.job_queue.run_daily(consolidate.nightly, time=time(hour=3, minute=30, tzinfo=tz))
             # Sentinel watchdog: every 30 minutes, compare live health to last state
             # and alert Brandon on new/persisting RED or recovery. First run at +2 min.
             app.job_queue.run_repeating(sentinel_watchdog, interval=1800, first=120)

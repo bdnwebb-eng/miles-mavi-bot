@@ -119,3 +119,51 @@ def lesson_by_id(lesson_id: str) -> dict | None:
         if lesson["lesson_id"] == lesson_id:
             return lesson
     return None
+
+
+# ---------- v7 transplant: the markdown mind ----------
+import re as _re
+
+
+def _load_text(relpath: str) -> str:
+    path = os.path.join(CONFIG_DIR, relpath)
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+@lru_cache(maxsize=1)
+def soul() -> str:
+    """Who Miles IS. config/SOUL.md, capped small, rides in every prompt."""
+    return _load_text("SOUL.md")
+
+
+@lru_cache(maxsize=1)
+def sources() -> str:
+    """The routing map: where truth lives per domain. Rides in every prompt."""
+    return _load_text("SOURCES.md")
+
+
+@lru_cache(maxsize=1)
+def knowledge_index() -> str:
+    """The knowledge menu. One line per drawer. Rides in every prompt."""
+    return _load_text(os.path.join("knowledge", "INDEX.md"))
+
+
+def knowledge_topics() -> list[str]:
+    kdir = os.path.join(CONFIG_DIR, "knowledge")
+    if not os.path.isdir(kdir):
+        return []
+    return sorted(f[:-3] for f in os.listdir(kdir) if f.endswith(".md") and f != "INDEX.md")
+
+
+def read_knowledge_topic(topic: str) -> str:
+    """Open one knowledge drawer for the current turn. Safe against path games."""
+    t = _re.sub(r"[^a-z0-9-]", "", (topic or "").lower().replace("_", "-").replace(".md", ""))
+    if not t:
+        return "Error: name a topic. Available: " + ", ".join(knowledge_topics())
+    text = _load_text(os.path.join("knowledge", t + ".md"))
+    if not text:
+        return f"Error: no topic '{t}'. Available: " + ", ".join(knowledge_topics())
+    return text

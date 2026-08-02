@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 _client: Anthropic | None = None
 
-MEMORY_LIMIT = 48                    # memories injected into the prompt
+CURATED_CHAR_CAP = 6000              # ~1500 tokens: the v1.3 curated-tier cap
 EXTRACT_EVERY = 8                    # user messages between extraction passes
 EXTRACT_MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_ROUNDS = 8
@@ -312,53 +312,24 @@ def build_system_prompt(tid: int) -> str:
         ledger_block = ("VERIFIED ACTION LEDGER: empty. You have performed no actions "
                         "recently. Any claim otherwise is false.")
 
-    p = cfg.persona()
-    bot_name = cfg.settings().get("bot", {}).get("name", "Assistant")
-    name = p.get("coach_name", "the assistant")
-    framework = p.get("framework_name", "their approach")
-    phrases = p.get("signature_phrases", []) or []
-    phrase_line = (
-        "Occasionally (not every message) you may use phrases like: "
-        + "; ".join(f'"{x}"' for x in phrases)
-        if phrases
-        else ""
-    )
+    soul = cfg.soul()
+    sources = cfg.sources()
+    kindex = cfg.knowledge_index()
 
-    # Principal context: goals and streaks still apply (they become Kas's tracked items).
     goals = [g["text"] for g in db.active_goals(tid)]
-    goals_line = (
-        "Current tracked goals: " + " | ".join(goals)
-        if goals
-        else "No tracked goals yet; offer /goals when it fits naturally."
-    )
-
-    done = db.completed_lessons(tid)
-    lessons = cfg.flat_lessons()
-    next_lesson = next((l for l in lessons if l["lesson_id"] not in done), None)
-    prog_line = (
-        f"In the program, their next step is \"{next_lesson['title']}\" "
-        f"({next_lesson['module_title']}). You may nudge them toward it via /program."
-        if next_lesson
-        else ""
-    )
-
+    goals_line = ("Current tracked goals: " + " | ".join(goals)) if goals else ""
     streak = db.checkin_streak(tid)
     streak_line = f"Current check-in streak: {streak} day(s)." if streak else ""
 
-    kb = cfg.knowledge_text()
-    kb_block = (
-        f"\n# {name}'s knowledge base (draw on this; don't quote it verbatim)\n{kb}\n" if kb else ""
-    )
-
-    # Long term memory: durable facts distilled from every past conversation.
-    mems = db.memories_for_prompt(tid, MEMORY_LIMIT)
+    # Curated memory: the ONLY memory tier that rides in the head (v1.3 cap).
+    mems = db.curated_for_prompt(CURATED_CHAR_CAP)
     mem_block = ""
     if mems:
         mem_lines = "\n".join(f"- ({m['category']}) {m['content']}" for m in mems)
         mem_block = (
-            "\n# Long term memory\n"
-            "Things you know from past conversations with this person. Use them naturally "
-            "in your answers; never recite this list or mention that you keep one unless asked.\n"
+            "\n# Curated memory (small and distilled; the only memory you carry)\n"
+            "Durable facts distilled nightly from past conversations. Use them naturally; "
+            "never recite the list. For anything older or more specific, call search_history.\n"
             f"{mem_lines}\n"
         )
 
@@ -415,45 +386,27 @@ def build_system_prompt(tid: int) -> str:
             "absent, say you have not.\n"
         )
 
-    brand = p.get("brand", "")
-    sister = p.get("sister_company", "")
-    org_line = brand + ((" and " + sister) if sister else "")
-
-    return f"""You are {bot_name}, the AI assistant that speaks in the voice of {name} \
-({p.get('full_name', name)}){(', of ' + org_line) if org_line else ''}. \
-You help with {p.get('niche', '')}. You talk TO the principal AS {name} — warm, first-person, \
-like {name} texting them.
+    return f"""You are Miles. WHO YOU ARE below is law; everything else serves it.
 
 # {date_line}
 
 # {ledger_block}
 
-# Who you are ({name}'s background)
-{p.get('bio', '')}
+# WHO YOU ARE
+{soul}
 
-# {name}'s philosophy ({framework})
-{p.get('philosophy', '')}
+# WHERE TRUTH LIVES
+{sources}
 
-# Domain principles you can draw on
-{p.get('domain_principles', '')}
-{kb_block}{mem_block}{tools_block}
-# Tone
-{p.get('tone', '')}
-{phrase_line}
-
-# Hard rules
-{p.get('guardrails', '')}
-
+# YOUR KNOWLEDGE LIBRARY
+The menu below lists your drawers. Open one with the read_knowledge tool the moment a task needs depth (pricing, proposals, booking doctrine, walls). Never guess what a drawer would say.
+{kindex}
+{mem_block}{tools_block}
 # This person's context
 {goals_line}
-{prog_line}
 {streak_line}
 
-When a request is clearly outside your scope or sensitive, respond with the spirit of:
-"{p.get('escalation_message', '')}"
-
-Answer as {name} would: practical, specific, and grounded. Keep replies concise."""
-
+Answer as Miles: practical, specific, grounded, concise."""
 
 def coach_reply(tid: int, user_text: str, image_b64: str | None = None,
                 image_media_type: str = "image/jpeg") -> str:

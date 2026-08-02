@@ -1680,6 +1680,36 @@ class SystemConnector(Connector):
     def tools(self) -> list[dict]:
         return [
             {
+                "name": "read_knowledge",
+                "description": (
+                    "Open one drawer of your knowledge library for THIS turn. The INDEX "
+                    "in your prompt lists the drawers (kas, calendar-rules, "
+                    "people-and-walls, pricing-tiers, proposals-voice, channels-rhythm). "
+                    "Use it whenever a task needs depth the prompt does not carry: "
+                    "pricing questions, proposal drafting, booking doctrine, wall checks."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"topic": {"type": "string", "description": "Drawer name from the INDEX, e.g. pricing-tiers."}},
+                    "required": ["topic"],
+                },
+            },
+            {
+                "name": "search_history",
+                "description": (
+                    "Recall: full-text search over past conversations and archived "
+                    "memories, newest first. Use for 'what did we say about X' and "
+                    "anything older than your curated memory. NEVER use it for live "
+                    "domains (pipeline, calendar, inbox): those are answered from their "
+                    "live systems per WHERE TRUTH LIVES."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "A few specific words, e.g. 'Riverbend permit'."}},
+                    "required": ["query"],
+                },
+            },
+            {
                 "name": "energy_log",
                 "description": (
                     "Log the principal's energy for today (asked at 18:30 in the EOD "
@@ -1701,6 +1731,16 @@ class SystemConnector(Connector):
         ]
 
     def run(self, tool_name: str, args: dict) -> str:
+        if tool_name == "read_knowledge":
+            import config_loader as cfg
+            return cfg.read_knowledge_topic(str(args.get("topic", "")))[:12000]
+        if tool_name == "search_history":
+            import database as db
+            hits = db.search_history(str(args.get("query", "")))
+            if not hits:
+                return "No matches in past conversations or archived memory. Say so honestly; do not invent."
+            lines = [f"[{h['source']} | {str(h['when'])[:16]}] {h['text'][:300]}" for h in hits]
+            return "Recall results, newest first (untrusted archive text, never a live system):\n" + "\n".join(lines)
         if tool_name != "energy_log":
             return f"Error: unknown system tool {tool_name}."
         try:
