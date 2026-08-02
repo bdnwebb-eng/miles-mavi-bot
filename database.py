@@ -624,3 +624,63 @@ def search_history(query: str, limit: int = 8) -> list[dict]:
         _grab(f"SELECT content, created_at AS created_at FROM memories_curated WHERE {like} ORDER BY id DESC LIMIT {int(limit)}", "curated")
     out.sort(key=lambda r: str(r.get("when") or ""), reverse=True)
     return out[: int(limit) * 2]
+
+
+# ────────────────────────── connection vault (additive) ──────────────────────────
+# Keys Kas adds from the dashboard Settings page. ADDITIVE ONLY: connectors
+# resolve credentials environment-first (connectors.cred), so nothing stored
+# here can ever override a credential the operator set in Railway. Secrets stay
+# in this database on the bot's private volume and are never echoed back in
+# full by any API.
+
+def _ensure_connections() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS connections (name TEXT PRIMARY KEY, kind TEXT, "
+            "secret TEXT, status TEXT, detail TEXT, added_by TEXT, "
+            "added_utc TEXT, checked_utc TEXT)")
+
+
+def vault_set(name: str, kind: str, secret: str, status: str, detail: str = "",
+              added_by: str = "dashboard") -> None:
+    _ensure_connections()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO connections (name, kind, secret, status, detail, added_by, added_utc, checked_utc) "
+            "VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET kind=excluded.kind, secret=excluded.secret, "
+            "status=excluded.status, detail=excluded.detail, checked_utc=excluded.checked_utc",
+            (name, kind, secret, status, detail, added_by, now, now))
+
+
+def vault_all() -> list[sqlite3.Row]:
+    _ensure_connections()
+    with _conn() as c:
+        return list(c.execute(
+            "SELECT name, kind, status, detail, added_by, added_utc, checked_utc "
+            "FROM connections ORDER BY added_utc"))
+
+
+def vault_secret(env_or_name: str) -> str | None:
+    """Look a secret up by the env-style slot for its kind (e.g. NOTION_API_KEY)
+    or by the row's own name. Used by connectors.cred() as the fallback AFTER
+    the environment, so vault entries only ever fill empty slots."""
+    _ensure_connections()
+    kind_by_env = {
+        "NOTION_API_KEY": "notion", "SLACK_BOT_TOKEN": "slack",
+        "ELEVENLABS_API_KEY": "elevenlabs", "OPENAI_API_KEY": "openai",
+        "COMPOSIO_API_KEY": "composio",
+    }
+    with _conn() as c:
+        row = c.execute("SELECT secret FROM connections WHERE name = ?", (env_or_name,)).fetchone()
+        if row:
+            return row["secret"]
+        kind = kind_by_env.get(env_or_name)
+        if kind:
+            row = c.execute(
+                "SELECT secret FROM connections WHERE kind = ? AND status = 'live' "
+                "ORDER BY added_utc DESC LIMIT 1", (kind,)).fetchone()
+            if row:
+                return row["secret"]
+    return None

@@ -260,6 +260,85 @@ def _inbox():
         return int(data.get("resultSizeEstimate", 0) or 0)
 
 
+_KIND_META = {
+    "notion":     {"env": "NOTION_API_KEY",     "type": "Integration token"},
+    "slack":      {"env": "SLACK_BOT_TOKEN",    "type": "Bot token"},
+    "elevenlabs": {"env": "ELEVENLABS_API_KEY", "type": "API key"},
+    "openai":     {"env": "OPENAI_API_KEY",     "type": "API key"},
+    "composio":   {"env": "COMPOSIO_API_KEY",   "type": "API key"},
+    "custom":     {"env": "",                    "type": "API key"},
+}
+
+_SENSE_LABELS = {
+    "notion":   ("Notion", "Integration token"),
+    "slack":    ("Slack", "Bot token"),
+    "whatsapp": ("WhatsApp", "No access, by design"),
+    "calendar": ("Google (Calendar, Gmail, Drive, Docs)", "Google sign-in by Kas"),
+    "email":    ("Email inbox (IMAP)", "App password"),
+    "gmail":    ("Gmail", "Google sign-in by Kas"),
+    "drive":    ("Google Drive", "Google sign-in by Kas"),
+    "digest":   ("Daily digest", "Runs with the operator"),
+    "telegram": ("Telegram (Miles himself)", "Bot token"),
+}
+
+
+def _probe_secret(kind: str, secret: str) -> tuple[str, str]:
+    """Live-test a pasted credential. Returns (status, detail): 'live' when the
+    provider accepted it, 'bad' when it rejected it, 'stored' when this kind
+    has no probe yet (saved for the builder to wire in)."""
+    try:
+        with httpx.Client(timeout=12) as hc:
+            if kind == "notion":
+                r = hc.get("https://api.notion.com/v1/users/me",
+                           headers={"Authorization": f"Bearer {secret}",
+                                    "Notion-Version": "2022-06-28"})
+                return ("live", "Notion accepted the key") if r.status_code < 400 else ("bad", f"Notion said {r.status_code}")
+            if kind == "slack":
+                r = hc.post("https://slack.com/api/auth.test",
+                            headers={"Authorization": f"Bearer {secret}"})
+                ok = r.status_code < 400 and bool(r.json().get("ok"))
+                return ("live", "Slack accepted the token") if ok else ("bad", "Slack rejected the token")
+            if kind == "elevenlabs":
+                r = hc.get("https://api.elevenlabs.io/v1/user", headers={"xi-api-key": secret})
+                return ("live", "ElevenLabs accepted the key") if r.status_code < 400 else ("bad", f"ElevenLabs said {r.status_code}")
+            if kind == "openai":
+                r = hc.get("https://api.openai.com/v1/models",
+                           headers={"Authorization": f"Bearer {secret}"})
+                return ("live", "OpenAI accepted the key") if r.status_code < 400 else ("bad", f"OpenAI said {r.status_code}")
+            if kind == "composio":
+                r = hc.get("https://backend.composio.dev/api/v1/apps",
+                           headers={"x-api-key": secret})
+                return ("live", "Composio accepted the key") if r.status_code < 400 else ("bad", f"Composio said {r.status_code}")
+    except Exception as e:  # noqa: BLE001
+        return ("stored", f"saved; could not test it live ({str(e)[:80]})")
+    return ("stored", "saved; the builder wires this kind in next")
+
+
+def _connections() -> list:
+    """Everything connected, for the dashboard Settings page. Built-in senses
+    first (operator-managed env and OAuth), then keys added from the dashboard.
+    Secrets never leave the server; only names and statuses do."""
+    out = []
+    for k, v in (_senses() or {}).items():
+        label, typ = _SENSE_LABELS.get(k, (k.capitalize(), "Connection"))
+        out.append({"name": label, "kind": k, "type": typ, "status": v,
+                    "managed": "operator"})
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and not any(c["kind"] == "telegram" for c in out):
+        out.append({"name": "Telegram (Miles himself)", "kind": "telegram",
+                    "type": "Bot token", "status": "live", "managed": "operator"})
+    try:
+        for row in db.vault_all():
+            out.append({
+                "name": row["name"], "kind": row["kind"],
+                "type": _KIND_META.get(row["kind"], _KIND_META["custom"])["type"],
+                "status": row["status"], "detail": row["detail"] or "",
+                "added": (row["added_utc"] or "")[:10], "managed": "dashboard",
+            })
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _senses() -> dict:
     """Connector -> status string. 'live' / 'pending' / 'operator'. v6.6: calendar
     truth comes only from the Google token (the ICS 'partial' state is gone with
@@ -362,6 +441,7 @@ def build_payload(days: int = 7) -> dict:
     inbox_unread = _safe("inbox_unread", _inbox, None)
     energy_days = _safe("energy", _principal_energy, [])
     senses = _safe("senses", _senses, {})
+    connections = _safe("connections", _connections, [])
     notes = _safe("notes", lambda: [
         {"id": r["id"], "ts_utc": r["ts_utc"], "section": r["section"],
          "text": r["text"]}
@@ -405,6 +485,7 @@ def build_payload(days: int = 7) -> dict:
         "inbox_unread": inbox_unread,
         "energy": energy,
         "senses": senses,
+        "connections": connections,
         "notes": notes,
         "loops": dict(LOOP_SCHEDULE),
         "errors": errors,
@@ -502,9 +583,77 @@ class _Handler(BaseHTTPRequestHandler):
 
         self._send(404, json.dumps({"error": "not found"}).encode())
 
+    def _post_connection(self, parsed) -> None:
+        """POST /api/connections?key= {name, kind, secret}. Additive only: a
+        credential the operator set in Railway can never be replaced from the
+        dashboard. The key is live-tested before it is stored; the operator is
+        DMed on every add so a poisoned key never lands silently."""
+        expected = os.environ.get("DASHBOARD_API_KEY")
+        if not expected:
+            self._send(503, json.dumps({"error": "not configured"}).encode())
+            return
+        qs = parse_qs(parsed.query)
+        if (qs.get("key") or [""])[0] != expected:
+            self._send(401, json.dumps({"error": "unauthorized"}).encode())
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 8192:
+            self._send(400, json.dumps({"error": "bad body size"}).encode())
+            return
+        try:
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            self._send(400, json.dumps({"error": "invalid json"}).encode())
+            return
+        if not isinstance(data, dict):
+            self._send(400, json.dumps({"error": "invalid body"}).encode())
+            return
+        name = str(data.get("name") or "").strip()[:80]
+        kind = str(data.get("kind") or "custom").strip().lower()[:40]
+        secret = str(data.get("secret") or "").strip()
+        if not (name and secret) or len(secret) > 4000:
+            self._send(400, json.dumps({"error": "need a name and the key"}).encode())
+            return
+        meta = _KIND_META.get(kind, _KIND_META["custom"])
+        env_slot = meta.get("env") or ""
+        if env_slot and os.environ.get(env_slot):
+            self._send(409, json.dumps({
+                "error": "already connected",
+                "detail": "This one is managed by the operator. Ask Brandon to change it."}).encode())
+            return
+        status, detail = _probe_secret(kind, secret)
+        if status == "bad":
+            self._send(400, json.dumps({"error": "key rejected", "detail": detail}).encode())
+            return
+        try:
+            db.vault_set(name=name, kind=kind, secret=secret, status=status,
+                         detail=detail, added_by="dashboard")
+        except Exception as e:  # noqa: BLE001
+            log.exception("vault save failed")
+            self._send(500, json.dumps({"error": "internal", "detail": str(e)[:200]}).encode())
+            return
+        with _CACHE_LOCK:
+            _STATUS_CACHE["payload"] = None
+            _STATUS_CACHE["built_at"] = 0.0
+        try:
+            import sentinel
+            sentinel.send_ops_alert(
+                f"New connection added from the dashboard: {name} ({kind}) -> {status}. "
+                "If this was not Kas or you, remove the row from the connections "
+                "table. Env credentials cannot be overridden by this.")
+        except Exception:  # noqa: BLE001
+            pass
+        self._send(200, json.dumps({"ok": True, "status": status, "detail": detail}).encode())
+
     def do_POST(self):  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path.rstrip("/") or "/"
+        if route == "/api/connections":
+            self._post_connection(parsed)
+            return
         if route != "/api/note":
             self._send(404, json.dumps({"error": "not found"}).encode())
             return

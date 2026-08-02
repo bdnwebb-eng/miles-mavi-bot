@@ -1,4 +1,4 @@
-"""Connector layer for Miles. Read only, env gated.
+"""Connector layer for Miles. Env gated; writes are confirm-first and ledger-logged.
 
 Each connector switches ON automatically when its credentials exist in the
 environment (Railway variables). Wiring a new account is a config job:
@@ -41,6 +41,20 @@ from zoneinfo import ZoneInfo
 import httpx
 
 LOCAL_TZ = ZoneInfo("Europe/Zurich")
+
+
+def cred(env_name: str) -> str | None:
+    """Resolve a credential: environment first (operator-set in Railway, can
+    never be overridden from the dashboard), then the additive vault Kas fills
+    from the dashboard Settings page. The vault only fills EMPTY slots."""
+    val = os.environ.get(env_name)
+    if val:
+        return val
+    try:
+        import database as _db
+        return _db.vault_secret(env_name)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 class Connector:
@@ -211,11 +225,11 @@ class NotionConnector(Connector):
         return "NOTION_API_KEY"
 
     def configured(self) -> bool:
-        return bool(os.environ.get("NOTION_API_KEY"))
+        return bool(cred("NOTION_API_KEY"))
 
     def _headers(self) -> dict:
         return {
-            "Authorization": f"Bearer {os.environ['NOTION_API_KEY']}",
+            "Authorization": f"Bearer {cred('NOTION_API_KEY')}",
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json",
         }
@@ -284,7 +298,7 @@ class NotionConnector(Connector):
             },
             {
                 "name": "notion_update_property",
-                "description": "Update ONE property on a Notion page (e.g. project health, next action, a date). The only write Miles is allowed. Always tell the principal exactly what you changed.",
+                "description": "Update ONE property on a Notion page (e.g. the pipeline Stage, project health, next action, a date). Confirm with the principal before changing, and always tell her exactly what you changed.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -298,6 +312,41 @@ class NotionConnector(Connector):
                         "value": {"type": "string", "description": "New value. For date use YYYY-MM-DD; for checkbox use true/false."},
                     },
                     "required": ["page_id", "property", "prop_type", "value"],
+                },
+            },
+            {
+                "name": "notion_create_page",
+                "description": (
+                    "Create a NEW Notion page (notes, briefs, any document) under an "
+                    "existing parent page. CONFIRM FIRST: tell the principal the title "
+                    "and where it will live, create only on her yes, then give her the "
+                    "link. Find the parent with notion_search. Content is plain text; "
+                    "blank lines split paragraphs."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "parent_page_id": {"type": "string", "description": "Existing page to nest under (from notion_search)."},
+                        "title": {"type": "string", "description": "Page title."},
+                        "content": {"type": "string", "description": "Body text. Blank lines split paragraphs."},
+                    },
+                    "required": ["parent_page_id", "title"],
+                },
+            },
+            {
+                "name": "notion_append_content",
+                "description": (
+                    "Append paragraphs to the END of an existing Notion page. Never "
+                    "overwrites anything. Confirm with the principal first and tell "
+                    "her exactly what you added and where."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "page_id": {"type": "string", "description": "The page to append to."},
+                        "content": {"type": "string", "description": "Text to add. Blank lines split paragraphs."},
+                    },
+                    "required": ["page_id", "content"],
                 },
             },
         ]
@@ -444,6 +493,46 @@ class NotionConnector(Connector):
                     if text:
                         lines.append(text)
                 return "\n".join(lines)[:6000] or "(page has no readable text blocks)"
+            if tool_name == "notion_create_page":
+                title = str(args.get("title", "")).strip()
+                parent_id = str(args.get("parent_page_id", "") or "").strip()
+                if not title:
+                    return "Error: need a title."
+                if not parent_id:
+                    return ("Error: need parent_page_id (find one with notion_search; "
+                            "every new page must live under an existing page).")
+                content = str(args.get("content", "") or "").strip()
+                children = []
+                for para in [p.strip() for p in content.split("\n\n") if p.strip()][:40]:
+                    children.append({"object": "block", "type": "paragraph",
+                                     "paragraph": {"rich_text": [{"type": "text", "text": {"content": para[:1900]}}]}})
+                payload = {
+                    "parent": {"page_id": parent_id},
+                    "properties": {"title": {"title": [{"type": "text", "text": {"content": title[:200]}}]}},
+                }
+                if children:
+                    payload["children"] = children
+                r = http.post(f"{self._API}/pages", headers=self._headers(), json=payload)
+                if r.status_code >= 400:
+                    return f"Error creating the page: {r.text[:400]}"
+                j = r.json()
+                return (f"Created Notion page '{title}' (id {j.get('id', '')}). {j.get('url', '')} "
+                        "Tell the principal exactly what you created and give her the link.")
+            if tool_name == "notion_append_content":
+                pid = str(args.get("page_id", "")).strip()
+                content = str(args.get("content", "") or "").strip()
+                if not (pid and content):
+                    return "Error: need page_id and content."
+                children = []
+                for para in [p.strip() for p in content.split("\n\n") if p.strip()][:40]:
+                    children.append({"object": "block", "type": "paragraph",
+                                     "paragraph": {"rich_text": [{"type": "text", "text": {"content": para[:1900]}}]}})
+                r = http.patch(f"{self._API}/blocks/{pid}/children", headers=self._headers(),
+                               json={"children": children})
+                if r.status_code >= 400:
+                    return f"Error appending: {r.text[:400]}"
+                return (f"Appended {len(children)} paragraph(s) to page {pid}. "
+                        "Tell the principal what you added.")
             return f"Error: unknown notion tool {tool_name}."
 
 
@@ -845,6 +934,29 @@ class GoogleConnector(Connector):
                 },
             },
             {
+                "name": "gmail_send",
+                "description": (
+                    "SEND an email from Kas's Gmail, as Kas. HARD GATE: use ONLY after "
+                    "Kas has seen the exact To, Subject and full body in THIS "
+                    "conversation and replied yes to sending. If she has not approved "
+                    "the final text, use gmail_draft instead. Recipients come from Kas "
+                    "or from the thread being answered, never invented from memory. "
+                    "After sending, tell her it is sent and restate the subject line. "
+                    "If this tool returns an error the email was NOT sent."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string", "description": "Recipient address(es), comma separated."},
+                        "subject": {"type": "string", "description": "Subject line Kas approved."},
+                        "body": {"type": "string", "description": "The exact body Kas approved."},
+                        "cc": {"type": "string", "description": "Optional cc address(es)."},
+                        "thread_id": {"type": "string", "description": "Optional Gmail thread id to reply inside."},
+                    },
+                    "required": ["to", "body"],
+                },
+            },
+            {
                 "name": "calendar_upcoming_v2",
                 "description": (
                     "List events from Kas's live Google Calendar (read), merged across ALL of her "
@@ -896,6 +1008,31 @@ class GoogleConnector(Connector):
                 },
             },
             {
+                "name": "calendar_update_event",
+                "description": (
+                    "Change ONE existing event on Kas's Google Calendar: new time, "
+                    "title, location or notes. CONFIRM FIRST: only after Kas approves "
+                    "the exact change. Find the event id with calendar_upcoming_v2. "
+                    "Pass only the fields that change. Times are RFC3339 wall times "
+                    "with an IANA timezone (default Europe/Zurich). Always tell Kas "
+                    "old vs new afterwards, with the link."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "string", "description": "The event id from calendar_upcoming_v2."},
+                        "calendar_id": {"type": "string", "description": "Calendar id the event lives on. Default 'primary'."},
+                        "summary": {"type": "string", "description": "New title, only if changing."},
+                        "start_iso": {"type": "string", "description": "New start, RFC3339 e.g. 2026-08-05T14:00:00. Only if changing."},
+                        "end_iso": {"type": "string", "description": "New end, RFC3339. Required when start_iso moves."},
+                        "location": {"type": "string", "description": "New location, only if changing."},
+                        "description": {"type": "string", "description": "New notes, only if changing."},
+                        "timezone": {"type": "string", "description": "IANA timezone for the new wall times. Default Europe/Zurich."},
+                    },
+                    "required": ["event_id"],
+                },
+            },
+            {
                 "name": "calendar_delete_event",
                 "description": (
                     "Delete ONE event from Kas's Google Calendar by event id. CONFIRM FIRST: only "
@@ -919,6 +1056,23 @@ class GoogleConnector(Connector):
                     "type": "object",
                     "properties": {"query": {"type": "string", "description": "Text to match in file names."}},
                     "required": ["query"],
+                },
+            },
+            {
+                "name": "drive_share",
+                "description": (
+                    "Share a Drive file as VIEWER and return its link. CONFIRM FIRST: "
+                    "only when Kas asked to share or send it. Pass email to share with "
+                    "one person quietly; omit email to turn on anyone-with-the-link "
+                    "viewing. Never grants edit rights. Give Kas the link afterwards."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string", "description": "File id from drive_search."},
+                        "email": {"type": "string", "description": "Optional. Share with this one address only."},
+                    },
+                    "required": ["file_id"],
                 },
             },
             {
@@ -1150,6 +1304,34 @@ class GoogleConnector(Connector):
                 did = r.json().get("id", "")
                 return (f"Draft saved to Kas's Gmail Drafts (draft id {did}). It is NOT sent. "
                         "Tell Kas it's ready for her to review and send.")
+
+            if tool_name == "gmail_send":
+                import base64
+                to = str(args.get("to", "")).strip()
+                subject = str(args.get("subject", "")).strip()
+                body = str(args.get("body", "")).strip()
+                cc = str(args.get("cc", "") or "").strip()
+                thread_id = str(args.get("thread_id", "") or "").strip()
+                if not to or not body:
+                    return "Error: need at least 'to' and 'body' to send."
+                lines = [f"To: {to}", "MIME-Version: 1.0", 'Content-Type: text/plain; charset="UTF-8"']
+                if cc:
+                    lines.insert(1, f"Cc: {cc}")
+                if subject:
+                    lines.insert(1, f"Subject: {subject}")
+                mime = ("\r\n".join(lines) + "\r\n\r\n" + body).encode("utf-8")
+                raw = base64.urlsafe_b64encode(mime).decode("ascii")
+                msg: dict = {"raw": raw}
+                if thread_id:
+                    msg["threadId"] = thread_id
+                r = http.post(f"{self._GMAIL}/messages/send", headers=h, json=msg)
+                if r.status_code >= 400:
+                    return f"Error: the email was NOT sent. Gmail said: {r.text[:300]}"
+                mid = str(r.json().get("id", "") or "")
+                if not mid:
+                    return "Error: the email was NOT sent (Gmail returned no message id)."
+                return (f"Sent email to {to} (message id {mid}). Tell Kas it is sent "
+                        "and restate the subject line as proof.")
 
             if tool_name == "calendar_upcoming_v2":
                 # Window: explicit start_date / end_date (Europe/Zurich) override days.
@@ -1432,6 +1614,42 @@ class GoogleConnector(Connector):
                              "htmlLink as proof."),
                 }, ensure_ascii=False)
 
+            if tool_name == "calendar_update_event":
+                event_id = str(args.get("event_id", "")).strip()
+                if not event_id:
+                    return "Error: need event_id."
+                raw_cal = str(args.get("calendar_id", "primary") or "primary").strip() or "primary"
+                cal_id = quote(raw_cal, safe="@")
+                patch: dict = {}
+                new_summary = str(args.get("summary", "") or "").strip()
+                if new_summary:
+                    patch["summary"] = new_summary
+                new_desc = str(args.get("description", "") or "").strip()
+                if new_desc:
+                    patch["description"] = new_desc
+                new_loc = str(args.get("location", "") or "").strip()
+                if new_loc:
+                    patch["location"] = new_loc
+                tz_name = str(args.get("timezone", "") or "Europe/Zurich").strip() or "Europe/Zurich"
+                start_iso = str(args.get("start_iso", "") or "").strip()
+                end_iso = str(args.get("end_iso", "") or "").strip()
+                if start_iso:
+                    patch["start"] = {"dateTime": start_iso, "timeZone": tz_name}
+                if end_iso:
+                    patch["end"] = {"dateTime": end_iso, "timeZone": tz_name}
+                if not patch:
+                    return "Error: nothing to change (pass a new time, title, location or notes)."
+                r = http.patch(f"{self._CAL}/calendars/{cal_id}/events/{quote(event_id, safe='')}",
+                               headers=h, json=patch)
+                if r.status_code >= 400:
+                    return f"Error: the event was NOT changed ({r.status_code}): {r.text[:300]}"
+                ev = r.json()
+                st = ev.get("start") or {}
+                return (f"Updated event {event_id} on calendar '{raw_cal}': "
+                        f"'{ev.get('summary', '')}' now starts "
+                        f"{st.get('dateTime') or st.get('date')} ({ev.get('htmlLink', '')}). "
+                        "Tell Kas exactly what changed, old vs new, with the link.")
+
             if tool_name == "calendar_delete_event":
                 event_id = str(args.get("event_id", "")).strip()
                 if not event_id:
@@ -1462,6 +1680,31 @@ class GoogleConnector(Connector):
                 if r.status_code >= 400:
                     return f"Error from Drive: {r.text[:300]}"
                 return json.dumps(r.json().get("files", []), ensure_ascii=False)
+
+            if tool_name == "drive_share":
+                fid = str(args.get("file_id", "")).strip()
+                if not fid:
+                    return "Error: need file_id."
+                email = str(args.get("email", "") or "").strip()
+                if email:
+                    perm = {"role": "reader", "type": "user", "emailAddress": email}
+                    share_params = {"sendNotificationEmail": "false"}
+                else:
+                    perm = {"role": "reader", "type": "anyone"}
+                    share_params = None
+                r = http.post(f"{self._DRIVE}/files/{fid}/permissions", headers=h,
+                              json=perm, params=share_params)
+                if r.status_code >= 400:
+                    return f"Error: sharing failed ({r.status_code}): {r.text[:300]}"
+                meta = http.get(f"{self._DRIVE}/files/{fid}", headers=h,
+                                params={"fields": "id,name,webViewLink"})
+                fname, link = fid, ""
+                if meta.status_code < 400:
+                    fname = str(meta.json().get("name", "") or fid)
+                    link = str(meta.json().get("webViewLink", "") or "")
+                who = email or "anyone with the link"
+                return (f"Shared '{fname}' with {who} as viewer. Link: {link} "
+                        "Give Kas this link and say who can open it.")
 
             if tool_name == "drive_create_folder":
                 name = str(args.get("name", "")).strip()

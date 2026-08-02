@@ -72,11 +72,13 @@ def _enforce_link_integrity(reply: str, tool_urls: list[str]) -> str:
 #    debounced to one per gate per 10 minutes.
 
 _WRITE_TOOLS = {
-    "calendar_create_event", "calendar_delete_event", "gmail_draft",
+    "calendar_create_event", "calendar_update_event", "calendar_delete_event",
+    "gmail_draft", "gmail_send",
     "docs_create", "docs_append", "docs_replace",
     "sheets_create", "sheets_write", "sheets_append", "slides_create",
-    "drive_create_folder", "drive_move", "drive_rename", "drive_trash",
-    "notion_update_property", "slack_post_message",
+    "drive_create_folder", "drive_move", "drive_rename", "drive_trash", "drive_share",
+    "notion_update_property", "notion_create_lead", "notion_create_page",
+    "notion_append_content", "slack_post_message",
 }
 
 
@@ -138,6 +140,34 @@ def _log_write_action(tid: int, tool: str, args: dict, out: str) -> bool:
         summary = f"Renamed Drive file {args.get('file_id', '')} to '{args.get('new_name', '')}'"
     elif tool == "drive_trash":
         summary = f"Moved Drive file {args.get('file_id', '')} to Trash (recoverable)"
+    elif tool == "gmail_send":
+        if not text.startswith("Sent email"):
+            return False
+        summary = (f"SENT email to {args.get('to', '')} subject "
+                   f"'{args.get('subject', '')}' (approved by Kas this turn)")
+    elif tool == "calendar_update_event":
+        if not text.startswith("Updated event"):
+            return False
+        summary = (f"Updated calendar event {args.get('event_id', '')} "
+                   f"({', '.join(k for k in ('start_iso', 'summary', 'location', 'description') if args.get(k)) or 'fields'})")
+    elif tool == "drive_share":
+        if not text.startswith("Shared"):
+            return False
+        summary = (f"Shared Drive file {args.get('file_id', '')} as viewer with "
+                   f"{args.get('email', '') or 'anyone with the link'}")
+    elif tool == "notion_create_lead":
+        if not text.startswith("Created lead"):
+            return False
+        summary = (f"Created pipeline lead {args.get('project_code', '')} "
+                   f"({args.get('client_name', '')}) on the MAVI Engagements Pipeline")
+    elif tool == "notion_create_page":
+        if not text.startswith("Created Notion page"):
+            return False
+        summary = f"Created Notion page '{args.get('title', '')}'"
+    elif tool == "notion_append_content":
+        if not text.startswith("Appended"):
+            return False
+        summary = f"Appended content to Notion page {args.get('page_id', '')}"
     elif tool == "notion_update_property":
         if not text.startswith("Updated"):
             return False
