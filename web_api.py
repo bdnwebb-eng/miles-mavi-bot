@@ -103,6 +103,7 @@ def _projects() -> list:
             is_cold = bool(days_stale is not None and days_stale > 7
                            and not live and stage != "Active Engagement")
             out.append({
+                "id": pg.get("id", ""),
                 "client": flat.get("Client Name") or nc._title_of(pg),
                 "code": flat.get("Project Code") or "",
                 "stage": stage,
@@ -648,9 +649,77 @@ class _Handler(BaseHTTPRequestHandler):
             pass
         self._send(200, json.dumps({"ok": True, "status": status, "detail": detail}).encode())
 
+    _ALLOWED_STAGES = ("Qualified Lead", "Intro Call Booked", "Proposal Sent",
+                       "Review Deposit Received", "Active Engagement", "Handover",
+                       "Post-Handover")
+
+    def _post_stage(self, parsed) -> None:
+        """POST /api/stage?key= {page_id, stage}. The kanban write: moves a card's
+        Stage select in Notion itself (the one source of truth), then verifies by
+        readback. The dashboard never keeps its own copy of the stage."""
+        expected = os.environ.get("DASHBOARD_API_KEY")
+        if not expected:
+            self._send(503, json.dumps({"error": "not configured"}).encode())
+            return
+        qs = parse_qs(parsed.query)
+        if (qs.get("key") or [""])[0] != expected:
+            self._send(401, json.dumps({"error": "unauthorized"}).encode())
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 2048:
+            self._send(400, json.dumps({"error": "bad body size"}).encode())
+            return
+        try:
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            self._send(400, json.dumps({"error": "invalid json"}).encode())
+            return
+        page_id = str((data or {}).get("page_id") or "").strip()
+        stage = str((data or {}).get("stage") or "").strip()
+        if not page_id or stage not in self._ALLOWED_STAGES:
+            self._send(400, json.dumps({"error": "need page_id and a real stage"}).encode())
+            return
+        api_key = connectors.cred("NOTION_API_KEY")
+        if not api_key:
+            self._send(503, json.dumps({"error": "Notion is not connected"}).encode())
+            return
+        headers = {"Authorization": f"Bearer {api_key}",
+                   "Notion-Version": "2022-06-28",
+                   "Content-Type": "application/json"}
+        try:
+            with httpx.Client(timeout=15) as hc:
+                r = hc.patch(f"https://api.notion.com/v1/pages/{page_id}",
+                             headers=headers,
+                             json={"properties": {"Stage": {"select": {"name": stage}}}})
+                if r.status_code >= 400:
+                    self._send(502, json.dumps(
+                        {"error": "Notion refused the move",
+                         "detail": r.text[:200]}).encode())
+                    return
+                got = (((r.json().get("properties") or {}).get("Stage") or {})
+                       .get("select") or {}).get("name")
+        except Exception as e:  # noqa: BLE001
+            self._send(502, json.dumps({"error": "internal", "detail": str(e)[:150]}).encode())
+            return
+        if got != stage:
+            self._send(502, json.dumps(
+                {"error": "verification failed",
+                 "detail": f"Notion reports stage '{got}'"}).encode())
+            return
+        with _CACHE_LOCK:
+            _STATUS_CACHE["payload"] = None
+            _STATUS_CACHE["built_at"] = 0.0
+        self._send(200, json.dumps({"ok": True, "stage": stage}).encode())
+
     def do_POST(self):  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path.rstrip("/") or "/"
+        if route == "/api/stage":
+            self._post_stage(parsed)
+            return
         if route == "/api/connections":
             self._post_connection(parsed)
             return
