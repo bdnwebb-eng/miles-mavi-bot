@@ -1385,7 +1385,10 @@ class GoogleConnector(Connector):
                     try:
                         page_token = ""
                         pages = 0
-                        while pages < 2:  # up to 2 pages (500 events) per calendar
+                        # Dense recurring calendars (the Ideal Week blocks) expand to
+                        # hundreds of instances over a long window; 2 pages truncated
+                        # them and made every two-month pull report itself incomplete.
+                        while pages < 8:  # up to 8 pages (2000 events) per calendar
                             params = {
                                 "timeMin": time_min,
                                 "timeMax": time_max,
@@ -1453,7 +1456,7 @@ class GoogleConnector(Connector):
                 notes = []
                 if truncated_cals:
                     notes.append(
-                        "Pagination stopped after 2 pages on: "
+                        "The read hit its depth limit on: "
                         + ", ".join(sorted(set(truncated_cals)))
                         + ". Later events on those calendars are missing from this pull.")
                 if failed_cals:
