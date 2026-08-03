@@ -261,6 +261,37 @@ def _inbox():
         return int(data.get("resultSizeEstimate", 0) or 0)
 
 
+_GDETAIL_CACHE: dict = {"at": 0.0, "email": "", "cals": []}
+
+
+def _google_account_details() -> tuple:
+    """The actual Google account address and the named calendars the token can
+    see, for the Settings Connections list. Cached 30 minutes; fails soft."""
+    now = time.time()
+    if now - _GDETAIL_CACHE["at"] < 1800 and (_GDETAIL_CACHE["email"] or _GDETAIL_CACHE["cals"]):
+        return _GDETAIL_CACHE["email"], _GDETAIL_CACHE["cals"]
+    email, cals = "", []
+    try:
+        gc = connectors.GoogleConnector()
+        h = gc._auth_headers()
+        with httpx.Client(timeout=12) as hc:
+            r = hc.get(f"{gc._GMAIL}/profile", headers=h)
+            if r.status_code < 400:
+                email = str(r.json().get("emailAddress") or "")
+            r = hc.get(f"{gc._CAL}/users/me/calendarList", headers=h,
+                       params={"maxResults": 50})
+            if r.status_code < 400:
+                for item in r.json().get("items", []) or []:
+                    nm = item.get("summaryOverride") or item.get("summary") or ""
+                    if nm:
+                        cals.append(str(nm))
+    except Exception:  # noqa: BLE001
+        pass
+    if email or cals:
+        _GDETAIL_CACHE.update({"at": now, "email": email, "cals": cals})
+    return email, cals
+
+
 _CHAT_LOCK = threading.Lock()
 
 
@@ -396,6 +427,37 @@ def _connections() -> list:
             })
     except Exception:  # noqa: BLE001
         pass
+    # Name the actual accounts: which Google address, which calendars, which inboxes.
+    gmail_addr, cal_names = _google_account_details()
+    imap_addrs = []
+    try:
+        imap_addrs = [str(a.get("address") or "")
+                      for a in connectors.EmailConnector()._accounts() if a.get("address")]
+    except Exception:  # noqa: BLE001
+        addr = os.environ.get("EMAIL_ADDRESS", "")
+        if addr:
+            imap_addrs = [addr]
+    wl = [x.strip() for x in os.environ.get(
+        "DASHBOARD_CAL_WHITELIST", "kas@maviliving.com,Outlook.KasBordier").split(",") if x.strip()]
+    for row in out:
+        kind = row.get("kind")
+        if kind == "calendar":
+            bits = []
+            if gmail_addr:
+                bits.append("account: " + gmail_addr)
+            if cal_names:
+                shown = ", ".join(cal_names[:8])
+                if len(cal_names) > 8:
+                    shown += f" + {len(cal_names) - 8} more"
+                bits.append(f"reads {len(cal_names)} calendars: " + shown)
+            if wl:
+                bits.append("on the dashboard: " + ", ".join(wl))
+            if bits:
+                row["detail"] = " · ".join(bits)
+        elif kind == "gmail" and gmail_addr:
+            row["detail"] = gmail_addr
+        elif kind == "email" and imap_addrs:
+            row["detail"] = "inbox: " + ", ".join(imap_addrs)
     return out
 
 
