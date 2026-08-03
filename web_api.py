@@ -261,6 +261,65 @@ def _inbox():
         return int(data.get("resultSizeEstimate", 0) or 0)
 
 
+_CHAT_LOCK = threading.Lock()
+
+
+def _chat_key() -> str | None:
+    """The dashboard chat key. Env DASHBOARD_CHAT_KEY wins; otherwise one is
+    minted once, kept in the bot's own DB, and DMed to the operator so he can
+    hand it to Kas. It is NEVER embedded in the dashboard page source."""
+    envk = os.environ.get("DASHBOARD_CHAT_KEY")
+    if envk:
+        return envk
+    try:
+        k = db.get_sentinel_state("dashboard_chat_key")
+        if not k:
+            import secrets
+            k = secrets.token_urlsafe(9)
+            db.set_sentinel_state("dashboard_chat_key", k)
+            try:
+                import sentinel
+                sentinel.send_ops_alert(
+                    "Dashboard chat is live. Chat key: " + k + " . Give it to Kas; "
+                    "she enters it once when she taps Miles's photo on the dashboard. "
+                    "Set DASHBOARD_CHAT_KEY in Railway to replace it any time.")
+            except Exception:  # noqa: BLE001
+                pass
+        return k
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _chat_tid(who: str = "principal") -> int | None:
+    """Whose conversation the dashboard chat joins. Default: the principal
+    (Kas), the SAME thread, memory and ledger as her Telegram chat, so Miles
+    is one person across both doors. 'operator' joins the operator's thread."""
+    try:
+        import sentinel
+        ops = sentinel.ops_chat_id()
+    except Exception:  # noqa: BLE001
+        ops = None
+    if who == "operator":
+        return int(ops) if ops else None
+    env = os.environ.get("DASHBOARD_CHAT_TID")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    try:
+        import config_loader as cfg
+        allowed = (cfg.settings().get("access", {}) or {}).get("allowed_ids") or []
+        for a in allowed:
+            if ops is None or int(a) != int(ops):
+                return int(a)
+        if allowed:
+            return int(allowed[0])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 _KIND_META = {
     "notion":     {"env": "NOTION_API_KEY",     "type": "Integration token"},
     "slack":      {"env": "SLACK_BOT_TOKEN",    "type": "Bot token"},
@@ -557,6 +616,28 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, body)
             return
 
+        if route == "/api/chat/history":
+            qs = parse_qs(parsed.query)
+            ck = _chat_key()
+            if not ck or (qs.get("key") or [""])[0] != ck:
+                self._send(401, json.dumps({"error": "unauthorized"}).encode())
+                return
+            tid = _chat_tid((qs.get("as") or ["principal"])[0])
+            if not tid:
+                self._send(503, json.dumps({"error": "no principal configured"}).encode())
+                return
+            try:
+                limit = min(int((qs.get("limit") or ["40"])[0]), 80)
+            except ValueError:
+                limit = 40
+            try:
+                rows = [{"role": r["role"], "content": r["content"]}
+                        for r in db.recent_messages(tid, limit)]
+            except Exception:  # noqa: BLE001
+                rows = []
+            self._send(200, json.dumps({"messages": rows}, ensure_ascii=False).encode("utf-8"))
+            return
+
         if route in ("/api/status", "/api/dashboard"):
             expected = os.environ.get("DASHBOARD_API_KEY")
             if not expected:
@@ -714,9 +795,58 @@ class _Handler(BaseHTTPRequestHandler):
             _STATUS_CACHE["built_at"] = 0.0
         self._send(200, json.dumps({"ok": True, "stage": stage}).encode())
 
+    def _post_chat(self, parsed) -> None:
+        """POST /api/chat?key=<chat key> {text, as?}. Runs the SAME brain as
+        Telegram: ai.coach_reply with the principal's thread, short-term
+        history, curated memory, verified ledger and every tool gate. The chat
+        key is separate from the dashboard read key and never appears in the
+        page source; Kas types it once."""
+        ck = _chat_key()
+        if not ck:
+            self._send(503, json.dumps({"error": "chat not configured"}).encode())
+            return
+        qs = parse_qs(parsed.query)
+        if (qs.get("key") or [""])[0] != ck:
+            self._send(401, json.dumps({"error": "unauthorized"}).encode())
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 16384:
+            self._send(400, json.dumps({"error": "bad body size"}).encode())
+            return
+        try:
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            self._send(400, json.dumps({"error": "invalid json"}).encode())
+            return
+        text = str((data or {}).get("text") or "").strip()
+        if not text or len(text) > 4000:
+            self._send(400, json.dumps({"error": "need text under 4000 characters"}).encode())
+            return
+        tid = _chat_tid(str((data or {}).get("as") or "principal"))
+        if not tid:
+            self._send(503, json.dumps({"error": "no principal configured"}).encode())
+            return
+        try:
+            import ai
+            with _CHAT_LOCK:
+                reply = ai.coach_reply(tid, text)
+        except Exception as e:  # noqa: BLE001
+            log.exception("dashboard chat failed")
+            self._send(500, json.dumps(
+                {"error": "Miles hit an error and did NOT finish that",
+                 "detail": str(e)[:200]}).encode())
+            return
+        self._send(200, json.dumps({"reply": reply}, ensure_ascii=False).encode("utf-8"))
+
     def do_POST(self):  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path.rstrip("/") or "/"
+        if route == "/api/chat":
+            self._post_chat(parsed)
+            return
         if route == "/api/stage":
             self._post_stage(parsed)
             return
@@ -796,6 +926,9 @@ def start() -> int:
     # Keep the dashboard payload warm so page loads answer instantly.
     threading.Thread(target=_refresh_cache_loop, name="status_cache", daemon=True).start()
     log.info("Dashboard API on :%s (warm cache refresher armed)", port)
+    # Mint the dashboard chat key on boot (no-op when it already exists) so the
+    # operator gets the DM immediately after deploy, not on first use.
+    threading.Thread(target=_chat_key, name="chat_key_mint", daemon=True).start()
     print(f"[web_api] Dashboard API listening on 0.0.0.0:{port}", flush=True)
     return port
 
