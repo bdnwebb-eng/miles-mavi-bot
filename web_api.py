@@ -261,6 +261,122 @@ def _inbox():
         return int(data.get("resultSizeEstimate", 0) or 0)
 
 
+_SOCIALS_CACHE: dict = {"at": 0.0, "data": None}
+
+
+def _socials() -> dict:
+    """Live social metrics for the Socials page. Reads the Meta Graph API when
+    an Instagram token is connected (env or vault); every platform without a
+    live source reports itself not connected instead of showing invented
+    numbers. Cached 30 minutes; every sub-call fails soft."""
+    now = time.time()
+    if _SOCIALS_CACHE["data"] is not None and now - _SOCIALS_CACHE["at"] < 1800:
+        return _SOCIALS_CACHE["data"]
+    platforms = []
+
+    ig = {"platform": "instagram", "label": "Instagram", "status": "pending",
+          "detail": "Not connected. Paste a Meta access token in Settings > Add a connection (pick Instagram) and this page fills itself."}
+    tok = connectors.cred("INSTAGRAM_ACCESS_TOKEN")
+    if tok:
+        try:
+            with httpx.Client(timeout=15) as hc:
+                ig_id = os.environ.get("INSTAGRAM_BUSINESS_ID", "").strip()
+                if not ig_id:
+                    r = hc.get("https://graph.facebook.com/v19.0/me/accounts",
+                               params={"fields": "instagram_business_account,name",
+                                       "access_token": tok})
+                    if r.status_code < 400:
+                        for page in r.json().get("data", []) or []:
+                            iba = (page.get("instagram_business_account") or {}).get("id")
+                            if iba:
+                                ig_id = iba
+                                break
+                if ig_id:
+                    prof = {}
+                    r = hc.get(f"https://graph.facebook.com/v19.0/{ig_id}",
+                               params={"fields": "username,name,followers_count,follows_count,media_count",
+                                       "access_token": tok})
+                    if r.status_code < 400:
+                        prof = r.json()
+                    media = []
+                    r = hc.get(f"https://graph.facebook.com/v19.0/{ig_id}/media",
+                               params={"fields": "caption,like_count,comments_count,media_type,permalink,timestamp",
+                                       "limit": 12, "access_token": tok})
+                    if r.status_code < 400:
+                        media = r.json().get("data", []) or []
+                    reach28 = None
+                    try:
+                        r = hc.get(f"https://graph.facebook.com/v19.0/{ig_id}/insights",
+                                   params={"metric": "reach", "period": "days_28",
+                                           "access_token": tok})
+                        if r.status_code < 400:
+                            vals = ((r.json().get("data") or [{}])[0].get("values") or [])
+                            if vals:
+                                reach28 = vals[-1].get("value")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    followers = int(prof.get("followers_count") or 0)
+                    likes = [int(m.get("like_count") or 0) for m in media]
+                    comments = [int(m.get("comments_count") or 0) for m in media]
+                    n = len(media)
+                    avg_likes = round(sum(likes) / n, 1) if n else None
+                    avg_comments = round(sum(comments) / n, 1) if n else None
+                    eng_rate = (round(100.0 * (sum(likes) + sum(comments)) / (n * followers), 2)
+                                if n and followers else None)
+                    try:
+                        db.socials_snapshot("instagram", followers, int(prof.get("media_count") or 0))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    growth7 = growth30 = None
+                    try:
+                        base7 = db.socials_lookback("instagram", 7)
+                        base30 = db.socials_lookback("instagram", 30)
+                        if base7 is not None:
+                            growth7 = followers - base7
+                        if base30 is not None:
+                            growth30 = followers - base30
+                    except Exception:  # noqa: BLE001
+                        pass
+                    recent = [{
+                        "when": str(m.get("timestamp") or "")[:10],
+                        "type": str(m.get("media_type") or "").lower(),
+                        "likes": int(m.get("like_count") or 0),
+                        "comments": int(m.get("comments_count") or 0),
+                        "caption": str(m.get("caption") or "")[:110],
+                        "link": str(m.get("permalink") or ""),
+                    } for m in media[:8]]
+                    ig = {"platform": "instagram", "label": "Instagram",
+                          "status": "live",
+                          "handle": "@" + str(prof.get("username") or ""),
+                          "metrics": {
+                              "followers": followers,
+                              "following": int(prof.get("follows_count") or 0),
+                              "posts": int(prof.get("media_count") or 0),
+                              "avg_likes": avg_likes,
+                              "avg_comments": avg_comments,
+                              "engagement_rate": eng_rate,
+                              "reach_28d": reach28,
+                              "growth_7d": growth7,
+                              "growth_30d": growth30,
+                          },
+                          "recent": recent}
+                else:
+                    ig["status"] = "stored"
+                    ig["detail"] = ("Token accepted, but no Instagram business account is linked to it. "
+                                    "The account must be a Business or Creator profile linked to a Facebook page.")
+        except Exception as e:  # noqa: BLE001
+            ig["status"] = "stored"
+            ig["detail"] = f"Token saved; the live read failed ({str(e)[:80]})."
+    platforms.append(ig)
+
+    for p, label in (("tiktok", "TikTok"), ("linkedin", "LinkedIn"), ("youtube", "YouTube")):
+        platforms.append({"platform": p, "label": label, "status": "pending",
+                          "detail": "Not connected yet. It appears here the day it is."})
+    out = {"platforms": platforms}
+    _SOCIALS_CACHE.update({"at": now, "data": out})
+    return out
+
+
 _GDETAIL_CACHE: dict = {"at": 0.0, "email": "", "cals": []}
 
 
@@ -357,6 +473,7 @@ _KIND_META = {
     "elevenlabs": {"env": "ELEVENLABS_API_KEY", "type": "API key"},
     "openai":     {"env": "OPENAI_API_KEY",     "type": "API key"},
     "composio":   {"env": "COMPOSIO_API_KEY",   "type": "API key"},
+    "instagram":  {"env": "INSTAGRAM_ACCESS_TOKEN", "type": "Meta access token"},
     "custom":     {"env": "",                    "type": "API key"},
 }
 
@@ -398,6 +515,10 @@ def _probe_secret(kind: str, secret: str) -> tuple[str, str]:
                 r = hc.get("https://api.openai.com/v1/models",
                            headers={"Authorization": f"Bearer {secret}"})
                 return ("live", "OpenAI accepted the key") if r.status_code < 400 else ("bad", f"OpenAI said {r.status_code}")
+            if kind == "instagram":
+                r = hc.get("https://graph.facebook.com/v19.0/me",
+                           params={"fields": "id,name", "access_token": secret})
+                return ("live", "Meta accepted the token") if r.status_code < 400 else ("bad", f"Meta said {r.status_code}")
             if kind == "composio":
                 r = hc.get("https://backend.composio.dev/api/v1/apps",
                            headers={"x-api-key": secret})
@@ -569,6 +690,7 @@ def build_payload(days: int = 7) -> dict:
     energy_days = _safe("energy", _principal_energy, [])
     senses = _safe("senses", _senses, {})
     connections = _safe("connections", _connections, [])
+    socials = _safe("socials", _socials, {})
     notes = _safe("notes", lambda: [
         {"id": r["id"], "ts_utc": r["ts_utc"], "section": r["section"],
          "text": r["text"]}
@@ -613,6 +735,7 @@ def build_payload(days: int = 7) -> dict:
         "energy": energy,
         "senses": senses,
         "connections": connections,
+        "socials": socials,
         "notes": notes,
         "loops": dict(LOOP_SCHEDULE),
         "errors": errors,

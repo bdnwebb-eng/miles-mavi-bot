@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 # Honor HERMES_DB_PATH (Railway volume) so memory survives restarts and redeploys.
 DB_PATH = os.environ.get("HERMES_DB_PATH") or os.path.join(
@@ -684,3 +684,34 @@ def vault_secret(env_or_name: str) -> str | None:
             if row:
                 return row["secret"]
     return None
+
+
+# ────────────────────────── socials history (daily snapshots) ──────────────────────────
+
+def _ensure_socials() -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS socials_history (platform TEXT, day TEXT, "
+            "followers INTEGER, media_count INTEGER, PRIMARY KEY (platform, day))")
+
+
+def socials_snapshot(platform: str, followers: int, media_count: int) -> None:
+    _ensure_socials()
+    day = date.today().isoformat()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO socials_history (platform, day, followers, media_count) VALUES (?,?,?,?) "
+            "ON CONFLICT(platform, day) DO UPDATE SET followers=excluded.followers, "
+            "media_count=excluded.media_count",
+            (platform, day, int(followers or 0), int(media_count or 0)))
+
+
+def socials_lookback(platform: str, days_ago: int) -> int | None:
+    """Followers count from ~days_ago days back (closest earlier snapshot)."""
+    _ensure_socials()
+    cutoff = (date.today() - timedelta(days=days_ago)).isoformat()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT followers FROM socials_history WHERE platform=? AND day<=? "
+            "ORDER BY day DESC LIMIT 1", (platform, cutoff)).fetchone()
+        return int(row["followers"]) if row else None
