@@ -19,6 +19,11 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _now() -> str:
+    """UTC timestamp string used by the curated-memory bookkeeping."""
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
 def init_db() -> None:
     with _conn() as c:
         # v7 transplant (2026-08-02): clean-head migration, one time. The old raw
