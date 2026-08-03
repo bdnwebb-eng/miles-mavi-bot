@@ -369,6 +369,8 @@ _SENSE_LABELS = {
     "gmail":    ("Gmail", "Google sign-in by Kas"),
     "drive":    ("Google Drive", "Google sign-in by Kas"),
     "digest":   ("Daily digest", "Runs with the operator"),
+    "google":   ("Google account", "Google sign-in by Kas"),
+    "instagram": ("Instagram", "Not wired into this worker yet"),
     "telegram": ("Telegram (Miles himself)", "Bot token"),
 }
 
@@ -454,10 +456,13 @@ def _connections() -> list:
                 bits.append("on the dashboard: " + ", ".join(wl))
             if bits:
                 row["detail"] = " · ".join(bits)
-        elif kind == "gmail" and gmail_addr:
+        elif kind in ("gmail", "google") and gmail_addr:
             row["detail"] = gmail_addr
-        elif kind == "email" and imap_addrs:
-            row["detail"] = "inbox: " + ", ".join(imap_addrs)
+        elif kind == "email":
+            if imap_addrs:
+                row["detail"] = "inbox: " + ", ".join(imap_addrs)
+            elif gmail_addr:
+                row["detail"] = "inbox: " + gmail_addr + " (through the Google sign-in)"
     return out
 
 
