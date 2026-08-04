@@ -961,7 +961,7 @@ class GoogleConnector(Connector):
                 "description": (
                     "List events from Kas's live Google Calendar (read), merged across ALL of her "
                     "calendars, not just primary. Times are Europe/Zurich. Default window is the next "
-                    "30 days; you may request up to 800 days, roughly two years ahead, so Kas can see "
+                    "30 days; you may request up to 1830 days, five years ahead, so Kas can see "
                     "far future events (a summit next year is always reachable). Use "
                     "start_date and end_date for a specific week or month (they override days). Use q "
                     "to find a person or meeting by name. The payload always states the exact window "
@@ -971,7 +971,7 @@ class GoogleConnector(Connector):
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "days": {"type": "integer", "description": "Window ahead in days, up to 800 (roughly two years ahead). Default 30."},
+                        "days": {"type": "integer", "description": "Window ahead in days, up to 1830 (five years ahead). Default 30."},
                         "start_date": {"type": "string", "description": "Optional window start, YYYY-MM-DD, Europe/Zurich. Overrides days."},
                         "end_date": {"type": "string", "description": "Optional window end, YYYY-MM-DD inclusive, Europe/Zurich. Overrides days."},
                         "q": {"type": "string", "description": "Optional free text search, e.g. a person or meeting name. Passed to Google's event search."},
@@ -1342,7 +1342,7 @@ class GoogleConnector(Connector):
                     days = int(args.get("days", 30) or 30)
                 except (TypeError, ValueError):
                     days = 30
-                days = max(1, min(days, 800))
+                days = max(1, min(days, 1830))
                 start_dt = now
                 if sd:
                     try:
