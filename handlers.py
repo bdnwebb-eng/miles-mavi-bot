@@ -373,8 +373,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def voice_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Kas sends a voice note (or an audio file); Miles transcribes it with
     ElevenLabs Speech to Text and handles it exactly like a typed message,
-    including the spoken reply when her voice preference is on. Never silent:
-    any failure gets a warm retry line."""
+    and always answers a voice note with a voice note as well as text. Never
+    silent: any failure gets a warm retry line."""
     tid = update.effective_user.id
     if context.user_data.get("state") == AWAITING_CODE or not _is_allowed(tid):
         await update.message.reply_text("Please /start and enter your access code first.")
@@ -415,8 +415,9 @@ async def voice_note_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Long term memory upkeep (self-gated, cheap, never blocks the reply)
     asyncio.create_task(asyncio.to_thread(ai.maybe_extract_memories, tid))
 
-    # Voice note reply (opt-in via /voice) when ElevenLabs is configured
-    if tts.enabled() and db.get_pref(tid, "voice", "off") == "on":
+    # Voice in always gets voice back: she spoke to Miles, Miles speaks in reply
+    # (plus the text above). The /voice toggle only governs typed messages.
+    if tts.enabled():
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id, action="record_voice"
         )
